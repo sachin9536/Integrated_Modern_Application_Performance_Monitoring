@@ -52,6 +52,10 @@ metrics_summary: Dict[str, Any] = {}
 anomaly_cache: List[str] = []
 prometheus_metrics: Dict[str, Any] = {}
 
+# --- In-memory cache for root cause analysis ---
+root_cause_cache = {}
+CACHE_TTL_SECONDS = 120  # 2 minutes
+
 # --- Enhanced Log Parsing ---
 def parse_log_line(line: str) -> Dict[str, Any]:
     """Parse structured and unstructured log lines, normalize level and service, always set message."""
@@ -65,13 +69,15 @@ def parse_log_line(line: str) -> Dict[str, Any]:
             if 'service' not in data or not data['service'] or data['service'].lower() == 'unknown':
                 msg = data.get('message', '')
                 path = data.get('path', '')
-                if '/signin' in path or '/register' in path or 'auth' in msg.lower():
+                event = data.get('event', '')
+                # Improved service inference
+                if 'auth_service' in msg or 'auth_service' in event or '/auth' in path or 'auth' in msg.lower():
                     data['service'] = 'auth_service'
-                elif '/order' in path or 'order' in msg.lower():
+                elif 'order_service' in msg or 'order_service' in event or '/order' in path or 'order' in msg.lower():
                     data['service'] = 'order_service'
-                elif '/product' in path or 'catalog' in msg.lower():
+                elif 'catalog_service' in msg or 'catalog_service' in event or '/catalog' in path or 'catalog' in msg.lower() or 'product' in msg.lower():
                     data['service'] = 'catalog_service'
-                elif 'controller' in msg.lower():
+                elif 'controller' in msg.lower() or 'controller' in event.lower():
                     data['service'] = 'controller'
                 else:
                     data['service'] = 'unknown'
@@ -89,11 +95,12 @@ def parse_log_line(line: str) -> Dict[str, Any]:
         data = match.groupdict()
         data['level'] = data.get('level', '').upper()
         msg = data.get('message', '')
-        if 'auth' in msg.lower():
+        # Improved service inference
+        if 'auth_service' in msg or '/auth' in msg or 'auth' in msg.lower():
             data['service'] = 'auth_service'
-        elif 'order' in msg.lower():
+        elif 'order_service' in msg or '/order' in msg or 'order' in msg.lower():
             data['service'] = 'order_service'
-        elif 'catalog' in msg.lower() or 'product' in msg.lower():
+        elif 'catalog_service' in msg or '/catalog' in msg or 'catalog' in msg.lower() or 'product' in msg.lower():
             data['service'] = 'catalog_service'
         elif 'controller' in msg.lower():
             data['service'] = 'controller'
@@ -175,7 +182,7 @@ def analyze_logs(logs: List[Dict[str, Any]]) -> Dict[str, Any]:
         }
     }
     
-    # Time-based analysis
+    # Time-based analysis (fix: each window is exclusive, not cumulative)
     current_time = datetime.now()
     time_windows = {
         "last_1h": current_time - timedelta(hours=1),
@@ -183,12 +190,15 @@ def analyze_logs(logs: List[Dict[str, Any]]) -> Dict[str, Any]:
         "last_5m": current_time - timedelta(minutes=5)
     }
     
+    # Prepare time series buckets
+    for window_name in time_windows:
+        stats["time_series"][window_name] = {"total": 0, "errors": 0}
+    
     for log in logs:
         msg = log.get("message", "")
         level = log.get("level", "")
         service = log.get("service", "unknown")
         status_code = log.get("status_code")
-        # Use either latency_ms or duration_ms
         latency = log.get("latency_ms")
         if latency is None:
             latency = log.get("duration_ms")
@@ -232,17 +242,32 @@ def analyze_logs(logs: List[Dict[str, Any]]) -> Dict[str, Any]:
         if status_code:
             stats["response_codes"][str(status_code)] = stats["response_codes"].get(str(status_code), 0) + 1
         
-        # Time series analysis
+        # Time series analysis (fix: each window is exclusive)
         try:
             if timestamp_str:
                 log_time = dateutil_parser.parse(timestamp_str)
                 for window_name, window_start in time_windows.items():
-                    if log_time >= window_start:
-                        if window_name not in stats["time_series"]:
-                            stats["time_series"][window_name] = {"total": 0, "errors": 0}
-                        stats["time_series"][window_name]["total"] += 1
-                        if "error" in msg.lower() or level == "ERROR":
-                            stats["time_series"][window_name]["errors"] += 1
+                    # Only count logs within this window (not cumulative)
+                    if log_time >= window_start and log_time <= current_time:
+                        # For each window, check if log_time is within window's range only
+                        # For last_5m: >= now-5m and <= now
+                        # For last_15m: >= now-15m and < now-5m
+                        # For last_1h: >= now-1h and < now-15m
+                        if window_name == "last_5m":
+                            if log_time >= current_time - timedelta(minutes=5):
+                                stats["time_series"][window_name]["total"] += 1
+                                if "error" in msg.lower() or level == "ERROR":
+                                    stats["time_series"][window_name]["errors"] += 1
+                        elif window_name == "last_15m":
+                            if current_time - timedelta(minutes=15) <= log_time < current_time - timedelta(minutes=5):
+                                stats["time_series"][window_name]["total"] += 1
+                                if "error" in msg.lower() or level == "ERROR":
+                                    stats["time_series"][window_name]["errors"] += 1
+                        elif window_name == "last_1h":
+                            if current_time - timedelta(hours=1) <= log_time < current_time - timedelta(minutes=15):
+                                stats["time_series"][window_name]["total"] += 1
+                                if "error" in msg.lower() or level == "ERROR":
+                                    stats["time_series"][window_name]["errors"] += 1
         except Exception:
             pass
     
@@ -450,19 +475,69 @@ async def ask_llm_groq(prompt: str) -> str:
     except Exception as e:
         return f"Groq API error: {str(e)}"
 
-async def ai_incident_analysis(anomaly, logs, metrics, dependencies=None):
-    # Truncate logs to avoid overwhelming the model
-    recent_logs = logs[-10:] if len(logs) > 10 else logs
+# --- Focused log selection for root cause analysis ---
+def select_focused_logs_for_anomaly(logs, anomaly_text=None, window=10, max_logs=20):
+    # If anomaly_text is provided, try to find the log index with matching message
+    if anomaly_text:
+        for i, log in enumerate(reversed(logs)):
+            if anomaly_text.lower() in json.dumps(log, default=str).lower():
+                # Found anomaly log, select window around it
+                start = max(0, len(logs) - i - window)
+                end = min(len(logs), len(logs) - i + window)
+                return logs[start:end]
+    # If no anomaly or not found, fallback to last N error logs
+    error_logs = [log for log in logs if log.get("level") == "ERROR" or "error" in log.get("message", "").lower()]
+    if error_logs:
+        return error_logs[-max_logs:]
+    # Fallback: last N logs
+    return logs[-max_logs:]
+
+async def ai_incident_analysis(anomaly, logs, metrics, dependencies=None, cache_key=None):
+    # --- Caching logic ---
+    now = time.time()
+    if cache_key and cache_key in root_cause_cache:
+        cached = root_cause_cache[cache_key]
+        if now - cached["timestamp"] < CACHE_TTL_SECONDS:
+            return cached["result"]
+    # --- Flexible log selection ---
+    if anomaly and anomaly != "No anomalies detected, manual analysis":
+        focused_logs = select_focused_logs_for_anomaly(logs, anomaly_text=anomaly)
+        prompt_type = "incident"
+    else:
+        # No anomaly: use last N error logs, or last N logs if no errors
+        error_logs = [log for log in logs if log.get("level") == "ERROR" or "error" in log.get("message", "").lower()]
+        focused_logs = error_logs[-20:] if error_logs else logs[-20:]
+        prompt_type = "general"
+    recent_logs = focused_logs[-20:]
     if not recent_logs:
         recent_logs = [{"message": "No recent logs available."}]
     if not metrics:
         metrics = {"total": 0, "errors": 0, "performance_metrics": {"error_rate": 0}}
-    prompt = f"""You are an SRE analyzing a system incident. Please provide a concise analysis.
+    if prompt_type == "incident":
+        prompt = f"""You are an SRE analyzing a system incident. Please provide a concise analysis.\n\nINCIDENT DETAILS:\nAnomaly: {anomaly}\n\nRECENT LOGS (last {len(recent_logs)}):\n{chr(10).join([json.dumps(log, default=str)[:200] + '...' if len(json.dumps(log, default=str)) > 200 else json.dumps(log, default=str) for log in recent_logs])}\n\nMETRICS SUMMARY:\n- Total requests: {metrics.get('total', 0)}\n- Error count: {metrics.get('errors', 0)}\n- Error rate: {metrics.get('performance_metrics', {}).get('error_rate', 0):.2f}%\n\nSERVICE DEPENDENCIES: {dependencies or 'N/A'}\n\nPlease provide:\n1. INCIDENT SUMMARY (2-3 sentences)\n2. LIKELY ROOT CAUSE (1-2 sentences)\n3. IMMEDIATE ACTIONS (2-3 bullet points)\n4. PREVENTION (1-2 recommendations)\n\nKeep response under 300 words.\n"""
+    else:
+        prompt = f"""You are an SRE reviewing system logs. No explicit anomaly was detected, but please review the following logs and metrics for any issues, unusual patterns, or potential risks.\n\nLOG SAMPLE (last {len(recent_logs)}):\n{chr(10).join([json.dumps(log, default=str)[:200] + '...' if len(json.dumps(log, default=str)) > 200 else json.dumps(log, default=str) for log in recent_logs])}\n\nMETRICS SUMMARY:\n- Total requests: {metrics.get('total', 0)}\n- Error count: {metrics.get('errors', 0)}\n- Error rate: {metrics.get('performance_metrics', {}).get('error_rate', 0):.2f}%\n\nSERVICE DEPENDENCIES: {dependencies or 'N/A'}\n\nPlease provide:\n1. OVERALL HEALTH SUMMARY (2-3 sentences)\n2. ANY ISSUES, RISKS, OR UNUSUAL PATTERNS (bullet points)\n3. RECOMMENDATIONS (1-2 bullet points)\n\nKeep response under 300 words.\n"""
+    ai_result = await ask_llm_groq(prompt)
+    result = {
+        "anomalies": anomaly_cache,
+        "root_cause": ai_result
+    }
+    # Cache the result
+    if cache_key:
+        root_cause_cache[cache_key] = {"timestamp": now, "result": result}
+    return result
 
-INCIDENT DETAILS:
-Anomaly: {anomaly}
+async def ai_log_summary(logs, metrics, dependencies=None):
+    # Limit to last 20 logs, and truncate each log string
+    max_logs = 30
+    recent_logs = logs[-max_logs:]
+    if not recent_logs:
+        recent_logs = [{"message": "No recent logs available."}]
+    if not metrics:
+        metrics = {"total": 0, "errors": 0, "performance_metrics": {"error_rate": 0}}
+    prompt = f"""You are an SRE reviewing system logs. Please provide a concise summary of the last {len(recent_logs)} logs.
 
-RECENT LOGS (last 10):
+LOG SAMPLE (last {len(recent_logs)}):
 {chr(10).join([json.dumps(log, default=str)[:200] + "..." if len(json.dumps(log, default=str)) > 200 else json.dumps(log, default=str) for log in recent_logs])}
 
 METRICS SUMMARY:
@@ -473,17 +548,15 @@ METRICS SUMMARY:
 SERVICE DEPENDENCIES: {dependencies or 'N/A'}
 
 Please provide:
-1. INCIDENT SUMMARY (2-3 sentences)
-2. LIKELY ROOT CAUSE (1-2 sentences)  
-3. IMMEDIATE ACTIONS (2-3 bullet points)
-4. PREVENTION (1-2 recommendations)
+1. OVERALL SUMMARY (2-3 sentences)
+2. NOTABLE TRENDS OR PATTERNS (1-2 sentences)
+3. ANY RECOMMENDATIONS (1-2 bullet points)
 
 Keep response under 300 words.
 """
     ai_result = await ask_llm_groq(prompt)
     return {
-        "anomalies": anomaly_cache,
-        "root_cause": ai_result
+        "summary": ai_result
     }
 
 # --- Background Task ---
@@ -525,7 +598,9 @@ async def api_metrics():
 @app.get("/api/ai_analysis")
 async def api_ai_analysis(
     time_window_minutes: int = Query(15, ge=1, le=120),
-    anomaly: str = Query(None, description="Optional anomaly description")
+    log_count: int = Query(None, ge=1, le=1000),
+    anomaly: str = Query(None, description="Optional anomaly description"),
+    mode: str = Query("root_cause", description="Analysis mode: 'root_cause' or 'summary'")
 ):
     now = datetime.now()
     window_start = now - timedelta(minutes=time_window_minutes)
@@ -533,15 +608,27 @@ async def api_ai_analysis(
         log for log in parsed_logs
         if "timestamp" in log and dateutil_parser.parse(log["timestamp"]).replace(tzinfo=None) >= window_start.replace(tzinfo=None)
     ]
+    if log_count is not None:
+        logs_window = parsed_logs[-log_count:]
     metrics_snapshot = metrics_summary.copy() if metrics_summary else {}
     dependencies = "auth_service -> order_service -> catalog_service (example)"
-    ai_result = await ai_incident_analysis(anomaly or "Manual analysis requested", logs_window, metrics_snapshot, dependencies)
-    return {
-        "anomaly": anomaly or "Manual analysis requested",
-        "time_window_minutes": time_window_minutes,
-        "log_count": len(logs_window),
-        "ai_analysis": ai_result
-    }
+    if mode == "summary":
+        ai_result = await ai_log_summary(logs_window, metrics_snapshot, dependencies)
+        return {
+            "mode": mode,
+            "log_count": len(logs_window),
+            "ai_summary": ai_result
+        }
+    else:
+        # --- Use anomaly and time window as cache key ---
+        cache_key = f"{anomaly or 'manual'}|{window_start.isoformat()}|{len(logs_window)}"
+        ai_result = await ai_incident_analysis(anomaly or "Manual analysis requested", logs_window, metrics_snapshot, dependencies, cache_key=cache_key)
+        return {
+            "anomaly": anomaly or "Manual analysis requested",
+            "time_window_minutes": time_window_minutes,
+            "log_count": len(logs_window),
+            "ai_analysis": ai_result
+        }
 
 @app.get("/api/root_cause")
 async def api_root_cause():

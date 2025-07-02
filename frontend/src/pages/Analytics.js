@@ -35,8 +35,8 @@ const Analytics = () => {
   const [responseTimeSeries, setResponseTimeSeries] = useState([]);
   const [loading, setLoading] = useState(true);
   const [lastUpdated, setLastUpdated] = useState(new Date());
-  const [rootCause, setRootCause] = useState(null);
-  const [rootCauseLoading, setRootCauseLoading] = useState(false);
+  const [logSummary, setLogSummary] = useState(null);
+  const [logSummaryLoading, setLogSummaryLoading] = useState(false);
 
   // Chart colors
   const colors = {
@@ -85,24 +85,39 @@ const Analytics = () => {
     }
   };
 
+  // Fetch AI log summary (general)
+  const fetchLogSummary = async () => {
+    try {
+      setLogSummaryLoading(true);
+      const result = await apiService.getAiLogSummary(200);
+      setLogSummary(result.ai_summary?.summary || result.ai_summary || null);
+    } catch (error) {
+      setLogSummary(null);
+      toast.error("Failed to fetch AI analysis");
+    } finally {
+      setLogSummaryLoading(false);
+    }
+  };
+
+  // Export AI analysis as PDF
+  const exportAnalysisAsPDF = () => {
+    if (!logSummary) return;
+    const doc = new jsPDF();
+    doc.setFontSize(16);
+    doc.text("AI Analysis", 10, 15);
+    doc.setFontSize(12);
+    const lines = doc.splitTextToSize(logSummary, 180);
+    doc.text(lines, 10, 30);
+    doc.save("ai-analysis.pdf");
+  };
+
   useEffect(() => {
     fetchAnalyticsData();
     const interval = setInterval(fetchAnalyticsData, 30000);
-    return () => clearInterval(interval);
+    return () => {
+      clearInterval(interval);
+    };
   }, []);
-
-  // Fetch root cause analysis
-  const fetchRootCauseAnalysis = async () => {
-    try {
-      setRootCauseLoading(true);
-      const result = await apiService.getRootCause();
-      setRootCause(result.root_cause);
-    } catch (error) {
-      toast.error("Failed to fetch root cause analysis");
-    } finally {
-      setRootCauseLoading(false);
-    }
-  };
 
   // Error type distribution
   const errorTypes = analytics?.log_analytics?.error_types || {};
@@ -122,6 +137,9 @@ const Analytics = () => {
     ([service, data]) => ({
       service,
       avgLatency: data.avg_latency || 0,
+      errorRate:
+        data.error_rate ||
+        ((data.errors || 0) / Math.max(data.total_requests || 1, 1)) * 100,
       totalRequests: data.total_requests || 0,
       errors: data.errors || 0,
     })
@@ -132,7 +150,7 @@ const Analytics = () => {
     {
       title: "Total Requests",
       value: analytics?.log_analytics?.total_requests || 0,
-      subtitle: "Last hour",
+      subtitle: "All time",
       icon: ChartBarIcon,
       color: "primary",
     },
@@ -146,7 +164,7 @@ const Analytics = () => {
     {
       title: "Avg Response Time",
       value: dataUtils.formatDuration(
-        analytics?.log_analytics?.latency_analysis?.average_ms / 1000
+        analytics?.log_analytics?.latency_stats?.avg_latency_ms / 1000
       ),
       subtitle: "Performance",
       icon: ClockIcon,
@@ -154,25 +172,15 @@ const Analytics = () => {
     },
     {
       title: "Success Rate",
-      value: analytics?.log_analytics?.throughput?.success_rate || "0%",
+      value:
+        analytics?.log_analytics?.latency_stats?.success_rate !== undefined
+          ? `${analytics.log_analytics.latency_stats.success_rate.toFixed(2)}%`
+          : "0%",
       subtitle: "Reliability",
       icon: ChartBarIcon,
       color: "success",
     },
   ];
-
-  // Export AI analysis as PDF
-  const exportAnalysisAsPDF = () => {
-    if (!rootCause?.root_cause?.root_cause) return;
-    const doc = new jsPDF();
-    doc.setFontSize(16);
-    doc.text("AI Root Cause Analysis", 10, 15);
-    doc.setFontSize(12);
-    // Split text into lines for better formatting
-    const lines = doc.splitTextToSize(rootCause.root_cause.root_cause, 180);
-    doc.text(lines, 10, 30);
-    doc.save("ai-analysis.pdf");
-  };
 
   return (
     <div className="space-y-8 animate-fadeIn">
@@ -219,135 +227,108 @@ const Analytics = () => {
         ))}
       </div>
 
-      {/* AI Root Cause Analysis */}
+      {/* AI Analysis (Single Card) */}
       <div className="card animate-fadeIn mt-8">
         <div className="card-header flex items-center justify-between">
           <div className="flex items-center space-x-2">
-            <CpuChipIcon className="w-6 h-6 text-purple-600" />
-            <h2 className="card-title">AI Root Cause Analysis</h2>
+            <CpuChipIcon className="w-6 h-6 text-blue-600" />
+            <h2 className="card-title">AI Analysis</h2>
           </div>
           <div className="flex items-center space-x-2">
             <button
               onClick={exportAnalysisAsPDF}
-              disabled={!rootCause?.root_cause?.root_cause}
+              disabled={!logSummary}
               className="btn btn-secondary"
               title="Export AI Analysis as PDF"
             >
               Export as PDF
             </button>
             <button
-              onClick={fetchRootCauseAnalysis}
-              disabled={rootCauseLoading}
+              onClick={fetchLogSummary}
+              disabled={logSummaryLoading}
               className="btn btn-secondary"
             >
               <LightBulbIcon
                 className={`w-4 h-4 mr-2 ${
-                  rootCauseLoading ? "animate-spin" : ""
+                  logSummaryLoading ? "animate-spin" : ""
                 }`}
               />
-              {rootCauseLoading ? "Analyzing..." : "Run Analysis"}
+              {logSummaryLoading ? "Analyzing..." : "Run Analysis"}
             </button>
           </div>
         </div>
         <div className="p-6">
-          {rootCause ? (
-            <div className="space-y-4">
-              {rootCause.root_cause?.anomalies &&
-              rootCause.root_cause.anomalies.length > 0 ? (
-                <div>
-                  <h3 className="text-lg font-semibold text-gray-900 mb-3 flex items-center">
-                    <ExclamationTriangleIcon className="w-5 h-5 text-danger-500 mr-2" />
-                    Detected Anomalies
-                  </h3>
-                  <div className="space-y-2">
-                    {rootCause.root_cause.anomalies.map((anomaly, index) => (
-                      <div
-                        key={index}
-                        className="flex items-start space-x-3 p-3 bg-red-50 border border-red-200 rounded-lg"
-                      >
-                        <ExclamationTriangleIcon className="w-5 h-5 text-red-500 mt-0.5 flex-shrink-0" />
-                        <span className="text-red-800">{anomaly}</span>
-                      </div>
-                    ))}
-                  </div>
-                </div>
-              ) : (
-                <div className="flex items-center space-x-3 p-4 bg-green-50 border border-green-200 rounded-lg">
-                  <ServerIcon className="w-5 h-5 text-green-500" />
-                  <span className="text-green-800">
-                    No anomalies detected - system is healthy
-                  </span>
-                </div>
-              )}
-
-              {rootCause.root_cause?.root_cause && (
-                <div className="mt-6">
-                  <h3 className="text-lg font-semibold text-gray-900 mb-3 flex items-center">
-                    <LightBulbIcon className="w-5 h-5 text-purple-500 mr-2" />
-                    AI Analysis
-                  </h3>
-                  <div className="prose prose-sm max-w-none">
-                    <div className="p-4 bg-gray-50 border border-gray-200 rounded-lg">
-                      <div className="text-gray-800">
-                        <ReactMarkdown>
-                          {rootCause.root_cause.root_cause}
-                        </ReactMarkdown>
-                      </div>
-                    </div>
-                  </div>
-                </div>
-              )}
+          {logSummaryLoading ? (
+            <div className="text-center py-8 text-gray-500">
+              Analyzing logs...
+            </div>
+          ) : logSummary ? (
+            <div className="prose prose-sm max-w-none">
+              <div className="p-4 bg-gray-50 border border-gray-200 rounded-lg">
+                <ReactMarkdown>{logSummary}</ReactMarkdown>
+              </div>
             </div>
           ) : (
-            <div className="text-center py-8">
-              <LightBulbIcon className="w-12 h-12 text-gray-400 mx-auto mb-4" />
-              <p className="text-gray-500">
-                Click "Run Analysis" to get AI-powered insights
-              </p>
+            <div className="text-center py-8 text-gray-500">
+              Click \"Run Analysis\" to get AI-powered log insights
             </div>
           )}
         </div>
       </div>
 
-      {/* Performance Charts */}
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-        {/* Error Rate Over Time */}
-        <div className="card">
-          <div className="card-header">
-            <h2 className="card-title">Error Rate Over Time</h2>
-          </div>
-          <ResponsiveContainer width="100%" height={300}>
-            <BarChart data={errorRateSeries}>
-              <CartesianGrid strokeDasharray="3 3" />
-              <XAxis dataKey="time" />
-              <YAxis />
-              <Tooltip formatter={(value) => [`${value}%`, "Error Rate"]} />
-              <Bar dataKey="value" fill={colors.danger} radius={[4, 4, 0, 0]} />
-            </BarChart>
-          </ResponsiveContainer>
+      {/* Service Performance Comparison (Grouped Bar Chart) */}
+      <div className="card">
+        <div className="card-header">
+          <h2 className="card-title">Service Performance Comparison</h2>
         </div>
-
-        {/* Response Time Over Time */}
-        <div className="card">
-          <div className="card-header">
-            <h2 className="card-title">Response Time Over Time</h2>
-          </div>
-          <ResponsiveContainer width="100%" height={300}>
-            <LineChart data={responseTimeSeries}>
-              <CartesianGrid strokeDasharray="3 3" />
-              <XAxis dataKey="time" />
-              <YAxis />
-              <Tooltip formatter={(value) => [`${value}s`, "Response Time"]} />
-              <Line
-                type="monotone"
-                dataKey="value"
-                stroke={colors.warning}
-                strokeWidth={2}
-                dot={{ fill: colors.warning, strokeWidth: 2, r: 4 }}
-              />
-            </LineChart>
-          </ResponsiveContainer>
-        </div>
+        <ResponsiveContainer width="100%" height={350}>
+          <BarChart
+            data={serviceData}
+            margin={{ top: 20, right: 30, left: 0, bottom: 5 }}
+          >
+            <CartesianGrid strokeDasharray="3 3" />
+            <XAxis dataKey="service" />
+            <YAxis
+              yAxisId="left"
+              orientation="left"
+              label={{
+                value: "Latency (ms)",
+                angle: -90,
+                position: "insideLeft",
+              }}
+            />
+            <YAxis
+              yAxisId="right"
+              orientation="right"
+              label={{
+                value: "Error Rate (%)",
+                angle: 90,
+                position: "insideRight",
+              }}
+            />
+            <Tooltip
+              formatter={(value, name) =>
+                name === "Error Rate (%)"
+                  ? [`${value.toFixed(2)}%`, name]
+                  : [`${value.toFixed(2)}ms`, name]
+              }
+            />
+            <Bar
+              yAxisId="left"
+              dataKey="avgLatency"
+              fill={colors.primary}
+              name="Avg Latency (ms)"
+              barSize={30}
+            />
+            <Bar
+              yAxisId="right"
+              dataKey="errorRate"
+              fill={colors.danger}
+              name="Error Rate (%)"
+              barSize={30}
+            />
+          </BarChart>
+        </ResponsiveContainer>
       </div>
 
       {/* Error Analysis */}
@@ -511,58 +492,65 @@ const Analytics = () => {
         </div>
       </div>
 
-      {/* Time Series Analysis */}
-      {analytics?.log_analytics?.time_series && (
-        <div className="card">
-          <div className="card-header">
-            <h2 className="card-title">Time Series Analysis</h2>
-          </div>
-          <div className="p-6">
-            <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
-              {Object.entries(analytics.log_analytics.time_series).map(
-                ([window, data]) => (
-                  <div
-                    key={window}
-                    className="text-center p-4 bg-gray-50 rounded-lg"
-                  >
-                    <h3 className="font-semibold text-gray-900 capitalize mb-2">
-                      {window.replace(/_/g, " ")}
-                    </h3>
-                    <div className="space-y-2">
-                      <div>
-                        <span className="text-sm text-gray-500">
-                          Total Requests:
-                        </span>
-                        <div className="text-xl font-bold text-gray-900">
-                          {data.total}
-                        </div>
-                      </div>
-                      <div>
-                        <span className="text-sm text-gray-500">Errors:</span>
-                        <div className="text-lg font-semibold text-red-600">
-                          {data.errors}
-                        </div>
-                      </div>
-                      <div>
-                        <span className="text-sm text-gray-500">
-                          Error Rate:
-                        </span>
-                        <div className="text-lg font-semibold">
-                          {data.total > 0
-                            ? `${((data.errors / data.total) * 100).toFixed(
-                                1
-                              )}%`
-                            : "0%"}
-                        </div>
-                      </div>
-                    </div>
-                  </div>
-                )
-              )}
-            </div>
-          </div>
+      {/* Recent Error Summary (replaces Time Series Analysis) */}
+      <div className="card">
+        <div className="card-header">
+          <h2 className="card-title">Recent Error Summary</h2>
         </div>
-      )}
+        <div className="p-6">
+          {analytics?.recent_errors && analytics.recent_errors.length > 0 ? (
+            <div className="space-y-3">
+              {analytics.recent_errors
+                .slice(-10)
+                .reverse()
+                .map((err, idx) => (
+                  <div
+                    key={idx}
+                    className="border-l-4 border-danger-500 bg-danger-50 p-3 rounded flex flex-col md:flex-row md:items-center md:space-x-4"
+                  >
+                    <span className="text-xs text-gray-500 w-32">
+                      {err.timestamp
+                        ? dataUtils.formatTimestamp(err.timestamp)
+                        : "N/A"}
+                    </span>
+                    <span className="text-xs text-danger-700 font-semibold w-32">
+                      {err.service || "Unknown"}
+                    </span>
+                    <span className="text-sm text-gray-900 flex-1">
+                      {err.message}
+                    </span>
+                  </div>
+                ))}
+            </div>
+          ) : (
+            <div className="text-center text-gray-500 py-8">
+              No recent errors found.
+            </div>
+          )}
+        </div>
+      </div>
+
+      {/* Error/Anomaly Timeline */}
+      <div className="card">
+        <div className="card-header">
+          <h2 className="card-title">Error/Anomaly Timeline</h2>
+        </div>
+        <ResponsiveContainer width="100%" height={300}>
+          <LineChart data={errorRateSeries}>
+            <CartesianGrid strokeDasharray="3 3" />
+            <XAxis dataKey="time" />
+            <YAxis />
+            <Tooltip formatter={(value) => [`${value}%`, "Error Rate"]} />
+            <Line
+              type="monotone"
+              dataKey="value"
+              stroke={colors.danger}
+              strokeWidth={2}
+              dot={{ fill: colors.danger, strokeWidth: 2, r: 4 }}
+            />
+          </LineChart>
+        </ResponsiveContainer>
+      </div>
     </div>
   );
 };

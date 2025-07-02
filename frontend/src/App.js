@@ -1,4 +1,4 @@
-import React, { useState } from "react";
+import React, { useState, useEffect } from "react";
 import { BrowserRouter as Router, Routes, Route } from "react-router-dom";
 import { Toaster } from "react-hot-toast";
 import Sidebar from "./components/Sidebar";
@@ -8,20 +8,52 @@ import Services from "./pages/Services";
 import Logs from "./pages/Logs";
 import Metrics from "./pages/Metrics";
 import Analytics from "./pages/Analytics";
+import { MoonIcon, SunIcon } from "@heroicons/react/24/outline";
 
 function App() {
   const [sidebarOpen, setSidebarOpen] = useState(false);
+  const [isDarkMode, setIsDarkMode] = useState(() => {
+    // Load from localStorage or default to false
+    return localStorage.getItem("darkMode") === "true";
+  });
+
+  useEffect(() => {
+    if (isDarkMode) {
+      document.documentElement.classList.add("dark");
+    } else {
+      document.documentElement.classList.remove("dark");
+    }
+    localStorage.setItem("darkMode", isDarkMode);
+  }, [isDarkMode]);
 
   return (
     <Router>
-      <div className="h-screen flex overflow-hidden bg-gray-50">
+      <div
+        className={`h-screen flex overflow-hidden bg-gray-50 dark:bg-gray-900 dark:text-gray-100`}
+      >
         {/* Sidebar */}
         <Sidebar open={sidebarOpen} setOpen={setSidebarOpen} />
 
         {/* Main content */}
         <div className="flex flex-col w-0 flex-1 overflow-hidden">
           {/* Header */}
-          <Header onMenuClick={() => setSidebarOpen(true)} />
+          <div className="relative">
+            <Header onMenuClick={() => setSidebarOpen(true)} />
+            {/* Dark mode toggle button */}
+            <button
+              className="absolute top-4 right-4 z-50 p-2 rounded-full bg-gray-200 dark:bg-gray-700 hover:bg-gray-300 dark:hover:bg-gray-600 transition-colors"
+              onClick={() => setIsDarkMode((d) => !d)}
+              title={
+                isDarkMode ? "Switch to light mode" : "Switch to dark mode"
+              }
+            >
+              {isDarkMode ? (
+                <SunIcon className="w-5 h-5 text-yellow-400" />
+              ) : (
+                <MoonIcon className="w-5 h-5 text-gray-700" />
+              )}
+            </button>
+          </div>
 
           {/* Main content area */}
           <main className="flex-1 relative overflow-y-auto focus:outline-none">
@@ -45,7 +77,7 @@ function App() {
           toastOptions={{
             duration: 4000,
             style: {
-              background: "#363636",
+              background: isDarkMode ? "#222" : "#363636",
               color: "#fff",
             },
             success: {

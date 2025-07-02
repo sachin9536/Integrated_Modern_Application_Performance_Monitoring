@@ -201,6 +201,14 @@ export const apiService = {
     });
     return response.data;
   },
+
+  // AI Log Summary (General)
+  async getAiLogSummary(logCount = 200) {
+    const response = await api.get("/api/ai_analysis", {
+      params: { log_count: logCount, mode: "summary" },
+    });
+    return response.data;
+  },
 };
 
 // Utility functions for data processing

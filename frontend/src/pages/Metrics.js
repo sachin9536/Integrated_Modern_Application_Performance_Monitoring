@@ -233,14 +233,15 @@ const Metrics = () => {
 
       {/* Time Window & Interval Selectors */}
       <div className="flex flex-wrap items-center gap-4 mb-2">
-        <div>
+        {/* Time Window Selector */}
+        <div className="relative">
           <label className="text-sm font-medium text-gray-700 mr-2">
             Time Window:
           </label>
           <select
             value={windowValue}
             onChange={(e) => setWindowValue(e.target.value)}
-            className="input"
+            className="input rounded-lg border border-primary-200 focus:ring-2 focus:ring-primary-400 focus:border-primary-400 shadow-sm px-3 py-2 bg-white text-gray-900 transition-all duration-150 hover:border-primary-400"
           >
             <option value="1h">Last 1 hour</option>
             <option value="6h">Last 6 hours</option>
@@ -249,14 +250,15 @@ const Metrics = () => {
             <option value="7d">Last 7 days</option>
           </select>
         </div>
-        <div>
+        {/* Interval Selector */}
+        <div className="relative">
           <label className="text-sm font-medium text-gray-700 mr-2">
             Interval:
           </label>
           <select
             value={intervalValue}
             onChange={(e) => setIntervalValue(e.target.value)}
-            className="input"
+            className="input rounded-lg border border-primary-200 focus:ring-2 focus:ring-primary-400 focus:border-primary-400 shadow-sm px-3 py-2 bg-white text-gray-900 transition-all duration-150 hover:border-primary-400"
           >
             <option value="1m">1 minute</option>
             <option value="5m">5 minutes</option>
@@ -331,6 +333,14 @@ const Metrics = () => {
         <div className="card">
           <div className="card-header">
             <h2 className="card-title">Error Rate Over Time</h2>
+            <div className="flex gap-2 mt-2">
+              <span className="text-xs text-gray-500">
+                Window: {windowValue}
+              </span>
+              <span className="text-xs text-gray-500">
+                Interval: {intervalValue}
+              </span>
+            </div>
           </div>
           <ResponsiveContainer width="100%" height={300}>
             <BarChart data={errorRateSeries}>
