@@ -106,19 +106,13 @@ const Metrics = () => {
       );
       setCpuUsageSeries(
         cpuUsageData.map((d) => ({
-          time: new Date(d.time).toLocaleTimeString([], {
-            hour: "2-digit",
-            minute: "2-digit",
-          }),
+          time: d.time,
           value: d.cpu_percent,
         }))
       );
       setMemoryUsageSeries(
         memoryUsageData.map((d) => ({
-          time: new Date(d.time).toLocaleTimeString([], {
-            hour: "2-digit",
-            minute: "2-digit",
-          }),
+          time: d.time,
           value: d.memory_mb,
         }))
       );
@@ -392,7 +386,18 @@ const Metrics = () => {
           <ResponsiveContainer width="100%" height={250}>
             <AreaChart data={cpuUsageSeries}>
               <CartesianGrid strokeDasharray="3 3" />
-              <XAxis dataKey="time" />
+              <XAxis
+                dataKey="time"
+                tickFormatter={(t) => {
+                  const date = new Date(t);
+                  return windowValue.endsWith("h") || windowValue.endsWith("m")
+                    ? date.toLocaleTimeString([], {
+                        hour: "2-digit",
+                        minute: "2-digit",
+                      })
+                    : date.toLocaleDateString();
+                }}
+              />
               <YAxis />
               <Tooltip formatter={(value) => [`${value}%`, "CPU Usage"]} />
               <Area
@@ -414,7 +419,18 @@ const Metrics = () => {
           <ResponsiveContainer width="100%" height={250}>
             <AreaChart data={memoryUsageSeries}>
               <CartesianGrid strokeDasharray="3 3" />
-              <XAxis dataKey="time" />
+              <XAxis
+                dataKey="time"
+                tickFormatter={(t) => {
+                  const date = new Date(t);
+                  return windowValue.endsWith("h") || windowValue.endsWith("m")
+                    ? date.toLocaleTimeString([], {
+                        hour: "2-digit",
+                        minute: "2-digit",
+                      })
+                    : date.toLocaleDateString();
+                }}
+              />
               <YAxis />
               <Tooltip />
               <Area

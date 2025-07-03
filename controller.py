@@ -276,7 +276,7 @@ async def main():
     if not await wait_for_all_services():
         log_json("ERROR", "Failed to start - services not ready")
         return
-    request_rate = 2  # initial RPM (reduced for lower load)
+    request_rate = 5  # initial RPM (reduced for lower load)
     increase_interval = 300
     start_time = time.time()
     async with aiohttp.ClientSession() as session:

@@ -1054,6 +1054,7 @@ async def error_rate_timeseries(
     # Prepare buckets
     buckets = defaultdict(lambda: {"total": 0, "errors": 0})
     logs = parsed_logs if parsed_logs else load_logs()
+    interval_seconds = int(interval_td.total_seconds())
     for log in logs:
         ts = log.get("timestamp")
         if not ts:
@@ -1064,13 +1065,9 @@ async def error_rate_timeseries(
             continue
         if log_time < start_time or log_time > now:
             continue
-        # Find bucket start
-        bucket_start = log_time - timedelta(
-            minutes=log_time.minute % interval_td.seconds//60,
-            seconds=log_time.second,
-            microseconds=log_time.microsecond
-        )
-        bucket_key = bucket_start.strftime("%Y-%m-%dT%H:%M:00Z")
+        # Robust bucket start calculation
+        bucket_start_ts = int((log_time.timestamp() // interval_seconds) * interval_seconds)
+        bucket_key = datetime.utcfromtimestamp(bucket_start_ts).strftime("%Y-%m-%dT%H:%M:00Z")
         buckets[bucket_key]["total"] += 1
         if log.get("level") == "ERROR" or ("error" in log.get("message", "").lower()):
             buckets[bucket_key]["errors"] += 1
@@ -1115,6 +1112,7 @@ async def http_requests_timeseries(
     start_time = now - window_td
     buckets = defaultdict(lambda: {"total": 0})
     logs = parsed_logs if parsed_logs else load_logs()
+    interval_seconds = int(interval_td.total_seconds())
     for log in logs:
         ts = log.get("timestamp")
         if not ts:
@@ -1125,12 +1123,8 @@ async def http_requests_timeseries(
             continue
         if log_time < start_time or log_time > now:
             continue
-        bucket_start = log_time - timedelta(
-            minutes=log_time.minute % (interval_td.seconds // 60),
-            seconds=log_time.second,
-            microseconds=log_time.microsecond
-        )
-        bucket_key = bucket_start.strftime("%Y-%m-%dT%H:%M:00Z")
+        bucket_start_ts = int((log_time.timestamp() // interval_seconds) * interval_seconds)
+        bucket_key = datetime.utcfromtimestamp(bucket_start_ts).strftime("%Y-%m-%dT%H:%M:00Z")
         buckets[bucket_key]["total"] += 1
     result = []
     for bucket in sorted(buckets.keys()):
@@ -1165,6 +1159,7 @@ async def response_time_timeseries(
     start_time = now - window_td
     buckets = defaultdict(lambda: {"count": 0, "sum": 0.0})
     logs = parsed_logs if parsed_logs else load_logs()
+    interval_seconds = int(interval_td.total_seconds())
     for log in logs:
         ts = log.get("timestamp")
         latency = log.get("latency_ms") or log.get("duration_ms")
@@ -1176,12 +1171,8 @@ async def response_time_timeseries(
             continue
         if log_time < start_time or log_time > now:
             continue
-        bucket_start = log_time - timedelta(
-            minutes=log_time.minute % (interval_td.seconds // 60),
-            seconds=log_time.second,
-            microseconds=log_time.microsecond
-        )
-        bucket_key = bucket_start.strftime("%Y-%m-%dT%H:%M:00Z")
+        bucket_start_ts = int((log_time.timestamp() // interval_seconds) * interval_seconds)
+        bucket_key = datetime.utcfromtimestamp(bucket_start_ts).strftime("%Y-%m-%dT%H:%M:00Z")
         buckets[bucket_key]["count"] += 1
         buckets[bucket_key]["sum"] += latency
     result = []
@@ -1230,16 +1221,27 @@ async def cpu_usage_timeseries(
             }
         )
         data = resp.json()
-    result = []
+    # Aggregate by bucket
+    buckets = {}
     for series in data.get("data", {}).get("result", []):
         service = series["metric"].get("service", "all")
         for v in series["values"]:
             ts, value = v
-            result.append({
-                "time": datetime.utcfromtimestamp(float(ts)).isoformat() + "Z",
-                "service": service,
-                "cpu_percent": float(value)
-            })
+            bucket_ts = int((float(ts) // step) * step)
+            key = (service, bucket_ts)
+            if key not in buckets:
+                buckets[key] = []
+            buckets[key].append(float(value))
+    result = []
+    for (service, bucket_ts), values in buckets.items():
+        avg_value = sum(values) / len(values)
+        result.append({
+            "time": datetime.utcfromtimestamp(bucket_ts).isoformat() + "Z",
+            "service": service,
+            "cpu_percent": avg_value
+        })
+    # Sort by time
+    result.sort(key=lambda x: x["time"])
     return result
 
 @app.get("/api/metrics/memory_usage_timeseries")
@@ -1276,16 +1278,25 @@ async def memory_usage_timeseries(
             }
         )
         data = resp.json()
-    result = []
+    buckets = {}
     for series in data.get("data", {}).get("result", []):
         service = series["metric"].get("service", "all")
         for v in series["values"]:
             ts, value = v
-            result.append({
-                "time": datetime.utcfromtimestamp(float(ts)).isoformat() + "Z",
-                "service": service,
-                "memory_mb": float(value)
-            })
+            bucket_ts = int((float(ts) // step) * step)
+            key = (service, bucket_ts)
+            if key not in buckets:
+                buckets[key] = []
+            buckets[key].append(float(value))
+    result = []
+    for (service, bucket_ts), values in buckets.items():
+        avg_value = sum(values) / len(values)
+        result.append({
+            "time": datetime.utcfromtimestamp(bucket_ts).isoformat() + "Z",
+            "service": service,
+            "memory_mb": avg_value
+        })
+    result.sort(key=lambda x: x["time"])
     return result
 
 @app.get("/api/metrics/response_code_distribution")
