@@ -257,15 +257,31 @@ async def test_invalid_payload(session: aiohttp.ClientSession, token: str):
     except Exception as e:
         log_json("ERROR", f"Invalid payload test error", error=str(e))
 
+def truncate_log_file(log_path="logs/metrics.log", max_size_mb=10, keep_lines=10000):
+    """Truncate the log file if it exceeds max_size_mb, keeping only the last keep_lines lines."""
+    import os
+    if not os.path.exists(log_path):
+        return
+    size_mb = os.path.getsize(log_path) / (1024 * 1024)
+    if size_mb > max_size_mb:
+        with open(log_path, "r", encoding="utf-8", errors="ignore") as f:
+            lines = f.readlines()
+        # Keep only the last N lines
+        lines = lines[-keep_lines:]
+        with open(log_path, "w", encoding="utf-8") as f:
+            f.writelines(lines)
+        print(f"[Log Rotation] Truncated {log_path} to last {keep_lines} lines (was {size_mb:.2f} MB)")
+
 async def main():
     if not await wait_for_all_services():
         log_json("ERROR", "Failed to start - services not ready")
         return
-    request_rate = 10  # initial RPM
+    request_rate = 2  # initial RPM (reduced for lower load)
     increase_interval = 300
     start_time = time.time()
     async with aiohttp.ClientSession() as session:
         while True:
+            truncate_log_file()  # Truncate log if needed before generating traffic
             tasks = [simulate_user_interaction(session, random.choice(USERS)) for _ in range(request_rate)]
             await asyncio.gather(*tasks)
             if time.time() - start_time > increase_interval:
