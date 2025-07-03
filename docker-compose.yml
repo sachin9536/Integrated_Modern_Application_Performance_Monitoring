@@ -162,9 +162,6 @@ services:
     networks:
       - private_net
     environment:
-      - GROQ_API_KEY=your-groq-api-key-here
-      - GROQ_MODEL=llama3-8b-8192
-      - PROMETHEUS_URL=http://prometheus:9090
     volumes:
       - ./logs:/app/logs
 

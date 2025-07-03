@@ -22,12 +22,24 @@ try:
 except ImportError:
     ollama = None
 
+# --- Email Alerting (SendGrid) ---
+try:
+    from sendgrid import SendGridAPIClient
+    from sendgrid.helpers.mail import Mail
+except ImportError:
+    SendGridAPIClient = None
+    Mail = None
+
 LOG_PATH = Path("/app/logs/metrics.log")
 PROMETHEUS_URL = os.getenv("PROMETHEUS_URL", "http://prometheus:9090")
 OLLAMA_URL = os.getenv("OLLAMA_URL", "http://host.docker.internal:11434")
 OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "llama3")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 GROQ_MODEL = os.getenv("GROQ_MODEL", "llama3-8b-8192")
+
+SENDGRID_API_KEY = os.getenv("SENDGRID_API_KEY")
+ALERT_EMAIL_FROM = os.getenv("ALERT_EMAIL_FROM")
+ALERT_EMAIL_TO = os.getenv("ALERT_EMAIL_TO")
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -55,6 +67,30 @@ prometheus_metrics: Dict[str, Any] = {}
 # --- In-memory cache for root cause analysis ---
 root_cause_cache = {}
 CACHE_TTL_SECONDS = 120  # 2 minutes
+
+# Track sent anomalies to avoid duplicate emails (in-memory, resets on restart)
+sent_anomalies = set()
+
+def send_email_alert(subject, content):
+    if not (SENDGRID_API_KEY and ALERT_EMAIL_FROM and ALERT_EMAIL_TO):
+        print("[Email Alert] Missing SENDGRID_API_KEY, ALERT_EMAIL_FROM, or ALERT_EMAIL_TO env vars.")
+        return
+    if not SendGridAPIClient or not Mail:
+        print("[Email Alert] SendGrid not installed.")
+        return
+    message = Mail(
+        from_email=ALERT_EMAIL_FROM,
+        to_emails=ALERT_EMAIL_TO,
+        subject=subject,
+        plain_text_content=content,
+        html_content=f"<pre>{content}</pre>"
+    )
+    try:
+        sg = SendGridAPIClient(SENDGRID_API_KEY)
+        response = sg.send(message)
+        print(f"[Email Alert] Sent: {subject} (status {response.status_code})")
+    except Exception as e:
+        print(f"[Email Alert] Failed: {e}")
 
 # --- Enhanced Log Parsing ---
 def parse_log_line(line: str) -> Dict[str, Any]:
@@ -399,6 +435,14 @@ def detect_anomalies(logs: List[Dict[str, Any]]) -> List[str]:
         if error_count > 3:
             anomalies.append(f"Service {service} has high error rate: {error_count} errors")
     
+    # --- Email alert for new anomalies ---
+    for anomaly in anomalies:
+        if anomaly not in sent_anomalies:
+            send_email_alert(
+                subject=f"[Health Monitor] Anomaly Detected",
+                content=f"Anomaly detected:\n{anomaly}\n\nSee dashboard for details."
+            )
+            sent_anomalies.add(anomaly)
     return anomalies
 
 # --- Enhanced Ollama Integration with better error handling
