@@ -2,122 +2,6 @@ version: "3.9"
 
 services:
   # ======================
-  # MongoDB Database
-  # ======================
-  mongodb:
-    image: mongo
-    container_name: mongodb
-    restart: always
-    environment:
-      MONGO_INITDB_ROOT_USERNAME: admin
-      MONGO_INITDB_ROOT_PASSWORD: secret
-    volumes:
-      - mongo-data:/data/db
-    ports:
-      - "27017:27017"
-    networks:
-      - private_net
-
-  # ======================
-  # Mongo Express UI
-  # ======================
-  mongo-express:
-    image: mongo-express
-    container_name: mongo-express
-    ports:
-      - "8081:8081"
-    environment:
-      - ME_CONFIG_MONGODB_SERVER=mongodb
-      - ME_CONFIG_MONGODB_ADMINUSERNAME=admin
-      - ME_CONFIG_MONGODB_ADMINPASSWORD=secret
-      - ME_CONFIG_MONGODB_ENABLE_ADMIN=true
-      - ME_CONFIG_BASICAUTH=false
-    depends_on:
-      - mongodb
-    networks:
-      - private_net
-
-  # ======================
-  # Auth Service
-  # ======================
-  auth_service:
-    build:
-      context: .
-      dockerfile: services/auth_service/Dockerfile
-    container_name: auth_service
-    depends_on:
-      - mongodb
-    ports:
-      - "8001:8000" # API
-      - "8002:8002" # Metrics
-    environment:
-      - MONGO_URI=mongodb://admin:secret@mongodb:27017
-      - JWT_SECRET=mysecretkey
-    networks:
-      - private_net
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8000/ping"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-      start_period: 30s
-    volumes:
-      - ./logs:/app/logs
-
-  # ======================
-  # Order Service
-  # ======================
-  order_service:
-    build:
-      context: .
-      dockerfile: services/order_service/Dockerfile
-    container_name: order_service
-    depends_on:
-      - mongodb
-    ports:
-      - "8003:8000" # API
-      - "8004:8004" # Metrics
-    environment:
-      - MONGO_URI=mongodb://admin:secret@mongodb:27017
-      - JWT_SECRET=mysecretkey
-    networks:
-      - private_net
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8000/ping"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-      start_period: 30s
-    volumes:
-      - ./logs:/app/logs
-
-  # ======================
-  # Catalog Service
-  # ======================
-  catalog_service:
-    build:
-      context: .
-      dockerfile: services/catalog_service/Dockerfile
-    container_name: catalog_service
-    depends_on:
-      - mongodb
-    ports:
-      - "8005:8000" # API
-      - "8006:8006" # Metrics
-    environment:
-      - MONGO_URI=mongodb://admin:secret@mongodb:27017
-    networks:
-      - private_net
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8000/ping"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-      start_period: 30s
-    volumes:
-      - ./logs:/app/logs
-
-  # ======================
   # Prometheus Monitoring
   # ======================
   prometheus:
@@ -127,33 +11,16 @@ services:
       - "9090:9090"
     volumes:
       - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml
-    depends_on:
-      - auth_service
-      - order_service
-      - catalog_service
     networks:
       - private_net
-  controller:
-    build:
-      context: .
-      dockerfile: Dockerfile.controller # see below
-    container_name: controller
-    depends_on:
-      auth_service:
-        condition: service_healthy
-      order_service:
-        condition: service_healthy
-      catalog_service:
-        condition: service_healthy
-    networks:
-      - private_net
-    volumes:
-      - ./logs:/app/logs
 
+  # ======================
+  # Monitoring Engine (Backend API)
+  # ======================
   monitoring_engine:
     build:
       context: .
-      dockerfile: Dockerfile.monitoring # see below
+      dockerfile: Dockerfile.monitoring
     container_name: monitoring_engine
     ports:
       - "8000:8000"
@@ -162,12 +29,141 @@ services:
     networks:
       - private_net
     environment:
+      - GROQ_API_KEY=your_groq_api_key
+      - GROQ_MODEL=llama3-8b-8192
+      - PROMETHEUS_URL=http://prometheus:9090
+      - SENDGRID_API_KEY=your_sendgrid_api_key
+      - ALERT_EMAIL_FROM=your_email@example.com
+      - ALERT_EMAIL_TO=your_email@example.com
     volumes:
       - ./logs:/app/logs
+      - ./data:/app/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/api/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
 
-volumes:
-  mongo-data:
+  # ======================
+  # (Optional) Frontend React App
+  # ======================
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: frontend
+    ports:
+      - "3000:3000"
+    networks:
+      - private_net
+    depends_on:
+      - monitoring_engine
+    environment:
+      - REACT_APP_API_URL=http://localhost:8000
+
+  # ======================
+  # Demo Services (profile: demo)
+  # ======================
+  service_alpha:
+    build:
+      context: .
+      dockerfile: ./services/service_alpha.Dockerfile
+    container_name: service_alpha
+    ports:
+      - "9101:8000"
+    networks:
+      - private_net
+    profiles: ["demo"]
+
+  service_beta:
+    build:
+      context: .
+      dockerfile: ./services/service_beta.Dockerfile
+    container_name: service_beta
+    ports:
+      - "9102:8000"
+    networks:
+      - private_net
+    profiles: ["demo"]
+
+  service_gamma:
+    build:
+      context: .
+      dockerfile: ./services/service_gamma.Dockerfile
+    container_name: service_gamma
+    ports:
+      - "9103:8000"
+    networks:
+      - private_net
+    profiles: ["demo"]
+
+  dummy_service:
+    build:
+      context: .
+      dockerfile: ./services/dummy_service.Dockerfile
+    container_name: dummy_service
+    ports:
+      - "9104:9000"
+    networks:
+      - private_net
+    profiles: ["demo"]
+
+  # service_delta:
+  #   build:
+  #     context: .
+  #     dockerfile: ./services/service_delta.Dockerfile
+  #   container_name: service_delta
+  #   ports:
+  #     - "9105:9400"
+  #   networks:
+  #     - private_net
+  #   profiles: ["demo"]
+
+  controller:
+    build:
+      context: .
+      dockerfile: Dockerfile.controller
+    container_name: controller
+    depends_on:
+      - service_alpha
+      - service_beta
+      - service_gamma
+      - dummy_service
+      # - service_delta
+    volumes:
+      - ./logs:/app/logs
+    networks:
+      - private_net
+    profiles: ["demo"]
+
+  # Auto-register demo services (runs once in demo mode)
+  register_demo_services:
+    image: python:3.11-slim
+    depends_on:
+      monitoring_engine:
+        condition: service_healthy
+      service_alpha:
+        condition: service_started
+      service_beta:
+        condition: service_started
+      service_gamma:
+        condition: service_started
+      dummy_service:
+        condition: service_started
+      # service_delta:
+      #   condition: service_started
+    volumes:
+      - ./register_demo_services.py:/register_demo_services.py:ro
+    environment:
+      - DEMO_MODE=1
+      - API_URL=http://monitoring_engine:8000
+    command: sh -c "pip install requests && python /register_demo_services.py"
+    profiles: ["demo"]
+    restart: "no"
 
 networks:
   private_net:
     driver: bridge
+# Usage:
+#   docker compose up                # Production mode (monitoring only)
+#   docker compose --profile demo up # Demo mode (with sample services and traffic generator)

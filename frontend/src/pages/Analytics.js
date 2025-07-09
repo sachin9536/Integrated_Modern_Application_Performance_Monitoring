@@ -37,6 +37,8 @@ const Analytics = () => {
   const [lastUpdated, setLastUpdated] = useState(new Date());
   const [logSummary, setLogSummary] = useState(null);
   const [logSummaryLoading, setLogSummaryLoading] = useState(false);
+  const [rca, setRca] = useState(null);
+  const [rcaLoading, setRcaLoading] = useState(false);
 
   // Chart colors
   const colors = {
@@ -58,15 +60,59 @@ const Analytics = () => {
           apiService.getResponseTimeTimeSeries("24h", "1h"),
         ]);
       setAnalytics(analyticsData);
-      setErrorRateSeries(
-        errorRateData.map((d) => ({
-          time: new Date(d.time).toLocaleTimeString([], {
+
+      // --- Fill missing time buckets for errorRateSeries ---
+      // Determine window and interval (should match backend call)
+      const windowHours = 24;
+      const intervalMinutes = 60; // 1h
+      const now = new Date();
+      const buckets = [];
+      for (let i = windowHours - 1; i >= 0; i--) {
+        const bucket = new Date(
+          now.getTime() - i * intervalMinutes * 60 * 1000
+        );
+        // Round to the hour
+        bucket.setMinutes(0, 0, 0);
+        buckets.push(bucket);
+      }
+      // Map backend data by ISO hour string
+      const dataMap = {};
+      errorRateData.forEach((d) => {
+        // d.time is in ISO format (e.g., 2024-06-09T12:00:00Z)
+        const t = new Date(d.time);
+        // Use local time for matching
+        const key =
+          t.getFullYear() +
+          "-" +
+          (t.getMonth() + 1).toString().padStart(2, "0") +
+          "-" +
+          t.getDate().toString().padStart(2, "0") +
+          " " +
+          t.getHours().toString().padStart(2, "0") +
+          ":00";
+        dataMap[key] = d.error_rate;
+      });
+      // Build filled series
+      const filledSeries = buckets.map((b) => {
+        const key =
+          b.getFullYear() +
+          "-" +
+          (b.getMonth() + 1).toString().padStart(2, "0") +
+          "-" +
+          b.getDate().toString().padStart(2, "0") +
+          " " +
+          b.getHours().toString().padStart(2, "0") +
+          ":00";
+        return {
+          time: b.toLocaleTimeString([], {
             hour: "2-digit",
             minute: "2-digit",
           }),
-          value: d.error_rate,
-        }))
-      );
+          value: dataMap[key] !== undefined ? dataMap[key] : 0,
+        };
+      });
+      setErrorRateSeries(filledSeries);
+
       setResponseTimeSeries(
         responseTimeData.map((d) => ({
           time: new Date(d.time).toLocaleTimeString([], {
@@ -90,25 +136,181 @@ const Analytics = () => {
     try {
       setLogSummaryLoading(true);
       const result = await apiService.getAiLogSummary(200);
-      setLogSummary(result.ai_summary?.summary || result.ai_summary || null);
+      // result.ai_summary.summary is the summary string
+      if (result.ai_summary?.summary) {
+        setLogSummary(result.ai_summary.summary);
+      } else if (typeof result.ai_summary === "string") {
+        setLogSummary(result.ai_summary);
+      } else {
+        setLogSummary(null);
+      }
     } catch (error) {
       setLogSummary(null);
-      toast.error("Failed to fetch AI analysis");
+      toast.error("Failed to fetch AI log summary");
     } finally {
       setLogSummaryLoading(false);
     }
   };
 
-  // Export AI analysis as PDF
-  const exportAnalysisAsPDF = () => {
+  // Fetch AI Root Cause Analysis (RCA)
+  const fetchRca = async () => {
+    try {
+      setRcaLoading(true);
+      const result = await apiService.getAiRootCause(200);
+      if (result.ai_analysis?.rca) {
+        setRca(result.ai_analysis.rca);
+      } else if (result.rca) {
+        setRca(result.rca);
+      } else {
+        setRca(null);
+      }
+    } catch (error) {
+      setRca(null);
+      toast.error("Failed to fetch AI RCA");
+    } finally {
+      setRcaLoading(false);
+    }
+  };
+
+  // Helper to parse AI log summary into sections
+  function parseLogSummary(summary) {
+    if (!summary) return {};
+    // Remove markdown bolds/stars and split into sections
+    const sections = {};
+    let current = null;
+    let buffer = [];
+    const lines = summary.split(/\r?\n/);
+    for (let line of lines) {
+      line = line.trim();
+      // Remove leading/trailing stars and bolds
+      line = line.replace(/^\*+|\*+$/g, "").replace(/^\*+|\*+$/g, "");
+      if (/^OVERALL SUMMARY/i.test(line)) {
+        if (current && buffer.length) sections[current] = buffer.join(" ");
+        current = "OVERALL SUMMARY";
+        buffer = [];
+      } else if (/^NOTABLE TRENDS OR PATTERNS/i.test(line)) {
+        if (current && buffer.length) sections[current] = buffer.join(" ");
+        current = "NOTABLE TRENDS OR PATTERNS";
+        buffer = [];
+      } else if (/^ANY RECOMMENDATIONS/i.test(line)) {
+        if (current && buffer.length) sections[current] = buffer.join(" ");
+        current = "ANY RECOMMENDATIONS";
+        buffer = [];
+      } else if (line) {
+        buffer.push(line);
+      }
+    }
+    if (current && buffer.length) sections[current] = buffer.join(" ");
+    // Split recommendations into bullets if present
+    if (sections["ANY RECOMMENDATIONS"]) {
+      sections["ANY RECOMMENDATIONS"] = sections["ANY RECOMMENDATIONS"]
+        .split(/\* |\n|\r/)
+        .map((s) => s.trim())
+        .filter(Boolean);
+    }
+    return sections;
+  }
+
+  // Export AI Log Summary as PDF
+  const exportLogSummaryAsPDF = () => {
     if (!logSummary) return;
     const doc = new jsPDF();
     doc.setFontSize(16);
-    doc.text("AI Analysis", 10, 15);
+    doc.text("AI Log Summary", 10, 15);
     doc.setFontSize(12);
-    const lines = doc.splitTextToSize(logSummary, 180);
-    doc.text(lines, 10, 30);
-    doc.save("ai-analysis.pdf");
+    const sections = parseLogSummary(logSummary);
+    let y = 25;
+    if (sections["OVERALL SUMMARY"]) {
+      doc.setFont(undefined, "bold");
+      doc.text("Overall Summary:", 10, y);
+      doc.setFont(undefined, "normal");
+      y += 7;
+      const lines = doc.splitTextToSize(sections["OVERALL SUMMARY"], 180);
+      doc.text(lines, 10, y);
+      y += lines.length * 7;
+    }
+    if (sections["NOTABLE TRENDS OR PATTERNS"]) {
+      doc.setFont(undefined, "bold");
+      doc.text("Notable Trends or Patterns:", 10, y);
+      doc.setFont(undefined, "normal");
+      y += 7;
+      const lines = doc.splitTextToSize(
+        sections["NOTABLE TRENDS OR PATTERNS"],
+        180
+      );
+      doc.text(lines, 10, y);
+      y += lines.length * 7;
+    }
+    if (sections["ANY RECOMMENDATIONS"]) {
+      doc.setFont(undefined, "bold");
+      doc.text("Recommendations:", 10, y);
+      doc.setFont(undefined, "normal");
+      y += 7;
+      sections["ANY RECOMMENDATIONS"].forEach((rec, i) => {
+        doc.text(`- ${rec}`, 12, y);
+        y += 7;
+      });
+    }
+    doc.save("ai-log-summary.pdf");
+  };
+
+  // Refactor exportAnalysisAsPDF for RCA
+  const exportAnalysisAsPDF = () => {
+    if (!rca) return;
+    const doc = new jsPDF();
+    doc.setFontSize(16);
+    doc.text("AI Root Cause Analysis", 10, 15);
+    doc.setFontSize(12);
+    let y = 25;
+    doc.setFont(undefined, "bold");
+    doc.text("Summary:", 10, y);
+    doc.setFont(undefined, "normal");
+    y += 7;
+    doc.text(doc.splitTextToSize(rca.summary || "N/A", 180), 10, y);
+    y += 14;
+    doc.setFont(undefined, "bold");
+    doc.text("Root Cause:", 10, y);
+    doc.setFont(undefined, "normal");
+    y += 7;
+    doc.text(doc.splitTextToSize(rca.root_cause || "N/A", 180), 10, y);
+    y += 14;
+    doc.setFont(undefined, "bold");
+    doc.text("Actions:", 10, y);
+    doc.setFont(undefined, "normal");
+    y += 7;
+    (rca.actions || ["N/A"]).forEach((a) => {
+      doc.text(`- ${a}`, 12, y);
+      y += 7;
+    });
+    y += 7;
+    doc.setFont(undefined, "bold");
+    doc.text("Prevention:", 10, y);
+    doc.setFont(undefined, "normal");
+    y += 7;
+    (rca.prevention || ["N/A"]).forEach((p) => {
+      doc.text(`- ${p}`, 12, y);
+      y += 7;
+    });
+    y += 7;
+    doc.setFont(undefined, "bold");
+    doc.text("Confidence:", 10, y);
+    doc.setFont(undefined, "normal");
+    y += 7;
+    doc.text(
+      `${rca.confidence !== undefined ? rca.confidence + "%" : "N/A"}`,
+      12,
+      y
+    );
+    y += 7;
+    doc.setFont(undefined, "bold");
+    doc.text("Evidence:", 10, y);
+    doc.setFont(undefined, "normal");
+    y += 7;
+    (rca.evidence || ["N/A"]).forEach((e) => {
+      doc.text(`- ${e}`, 12, y);
+      y += 7;
+    });
+    doc.save("ai-root-cause-analysis.pdf");
   };
 
   useEffect(() => {
@@ -227,19 +429,18 @@ const Analytics = () => {
         ))}
       </div>
 
-      {/* AI Analysis (Single Card) */}
+      {/* AI Log Summary Card */}
       <div className="card animate-fadeIn mt-8">
         <div className="card-header flex items-center justify-between">
           <div className="flex items-center space-x-2">
             <CpuChipIcon className="w-6 h-6 text-blue-600" />
-            <h2 className="card-title">AI Analysis</h2>
+            <h2 className="card-title">AI Log Summary</h2>
           </div>
-          <div className="flex items-center space-x-2">
+          <div className="flex gap-2">
             <button
-              onClick={exportAnalysisAsPDF}
+              onClick={exportLogSummaryAsPDF}
               disabled={!logSummary}
               className="btn btn-secondary"
-              title="Export AI Analysis as PDF"
             >
               Export as PDF
             </button>
@@ -265,12 +466,129 @@ const Analytics = () => {
           ) : logSummary ? (
             <div className="prose prose-sm max-w-none">
               <div className="p-4 bg-gray-50 border border-gray-200 rounded-lg">
-                <ReactMarkdown>{logSummary}</ReactMarkdown>
+                {(() => {
+                  const sections = parseLogSummary(logSummary);
+                  return (
+                    <>
+                      {sections["OVERALL SUMMARY"] && (
+                        <div className="mb-2">
+                          <strong>Overall Summary:</strong>{" "}
+                          {sections["OVERALL SUMMARY"]}
+                        </div>
+                      )}
+                      {sections["NOTABLE TRENDS OR PATTERNS"] && (
+                        <div className="mb-2">
+                          <strong>Notable Trends or Patterns:</strong>{" "}
+                          {sections["NOTABLE TRENDS OR PATTERNS"]}
+                        </div>
+                      )}
+                      {sections["ANY RECOMMENDATIONS"] && (
+                        <div className="mb-2">
+                          <strong>Recommendations:</strong>
+                          <ul className="list-disc ml-6">
+                            {sections["ANY RECOMMENDATIONS"].map((rec, i) => (
+                              <li key={i}>{rec}</li>
+                            ))}
+                          </ul>
+                        </div>
+                      )}
+                    </>
+                  );
+                })()}
               </div>
             </div>
           ) : (
             <div className="text-center py-8 text-gray-500">
-              Click \"Run Analysis\" to get AI-powered log insights
+              Click "Run Analysis" to get an AI-powered log summary.
+            </div>
+          )}
+        </div>
+      </div>
+
+      {/* AI Root Cause Analysis Card */}
+      <div className="card animate-fadeIn mt-8">
+        <div className="card-header flex items-center justify-between">
+          <div className="flex items-center space-x-2">
+            <CpuChipIcon className="w-6 h-6 text-blue-600" />
+            <h2 className="card-title">AI Root Cause Analysis</h2>
+          </div>
+          <div className="flex gap-2">
+            <button
+              onClick={exportAnalysisAsPDF}
+              disabled={!rca}
+              className="btn btn-secondary"
+            >
+              Export as PDF
+            </button>
+            <button
+              onClick={fetchRca}
+              disabled={rcaLoading}
+              className="btn btn-secondary"
+            >
+              <LightBulbIcon
+                className={`w-4 h-4 mr-2 ${rcaLoading ? "animate-spin" : ""}`}
+              />
+              {rcaLoading ? "Analyzing..." : "Run Analysis"}
+            </button>
+          </div>
+        </div>
+        <div className="p-6">
+          {rcaLoading ? (
+            <div className="text-center py-8 text-gray-500">
+              Analyzing logs...
+            </div>
+          ) : rca ? (
+            <div className="prose prose-sm max-w-none">
+              <div className="p-4 bg-gray-50 border border-gray-200 rounded-lg space-y-3">
+                <div>
+                  <strong>Summary:</strong> {rca.summary || "N/A"}
+                </div>
+                <div>
+                  <strong>Root Cause:</strong> {rca.root_cause || "N/A"}
+                </div>
+                <div>
+                  <strong>Actions:</strong>
+                  <ul className="list-disc ml-6">
+                    {rca.actions && rca.actions.length > 0 ? (
+                      rca.actions.map((a, i) => <li key={i}>{a}</li>)
+                    ) : (
+                      <li>N/A</li>
+                    )}
+                  </ul>
+                </div>
+                <div>
+                  <strong>Prevention:</strong>
+                  <ul className="list-disc ml-6">
+                    {rca.prevention && rca.prevention.length > 0 ? (
+                      rca.prevention.map((p, i) => <li key={i}>{p}</li>)
+                    ) : (
+                      <li>N/A</li>
+                    )}
+                  </ul>
+                </div>
+                <div>
+                  <strong>Confidence:</strong>{" "}
+                  {rca.confidence !== undefined ? `${rca.confidence}%` : "N/A"}
+                </div>
+                <div>
+                  <strong>Evidence:</strong>
+                  <ul className="list-disc ml-6">
+                    {rca.evidence && rca.evidence.length > 0 ? (
+                      rca.evidence.map((e, i) => (
+                        <li key={i}>
+                          <code>{e}</code>
+                        </li>
+                      ))
+                    ) : (
+                      <li>N/A</li>
+                    )}
+                  </ul>
+                </div>
+              </div>
+            </div>
+          ) : (
+            <div className="text-center py-8 text-gray-500">
+              Click "Run Analysis" to get AI-powered root cause analysis.
             </div>
           )}
         </div>

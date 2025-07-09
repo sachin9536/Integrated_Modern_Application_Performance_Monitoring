@@ -9,13 +9,13 @@ from prometheus_client import Histogram
 from .metrics import record_http_request, record_error
 
 # Ensure logs directory exists
-os.makedirs("/app/logs", exist_ok=True)
+os.makedirs("logs", exist_ok=True)
 
 # Configure structured logging to shared log file
 logging.basicConfig(
     level=logging.INFO,
     format='%(message)s',
-    handlers=[logging.FileHandler("/app/logs/metrics.log", mode='a'), logging.StreamHandler()]
+    handlers=[logging.FileHandler("logs/metrics.log", mode='a'), logging.StreamHandler()]
 )
 logger = logging.getLogger(__name__)
 

@@ -209,6 +209,76 @@ export const apiService = {
     });
     return response.data;
   },
+
+  // AI Root Cause Analysis (Full RCA)
+  async getAiRootCause(logCount = 200) {
+    const response = await api.get("/api/ai_analysis", {
+      params: { log_count: logCount, mode: "root_cause" },
+    });
+    return response.data;
+  },
+
+  // Register a new service
+  async registerService({ name, url }) {
+    const response = await api.post("/api/services", { name, url });
+    return response.data;
+  },
+
+  // Registered Services (new endpoints)
+  async getRegisteredServices() {
+    const response = await api.get("/api/registered_services");
+    return response.data;
+  },
+  async registerRegisteredService({ name, url }) {
+    const response = await api.post("/api/registered_services", { name, url });
+    return response.data;
+  },
+
+  // Test a metrics endpoint before registration
+  async testMetricsEndpoint(url) {
+    const response = await api.get("/api/test_metrics_endpoint", {
+      params: { url },
+    });
+    return response.data;
+  },
+
+  // Delete a registered service by name
+  async deleteRegisteredService(name) {
+    const response = await api.delete("/api/registered_services", {
+      params: { name },
+    });
+    return response.data;
+  },
+
+  // System Overview
+  async getSystemOverview() {
+    const response = await api.get("/api/system_overview");
+    return response.data;
+  },
+
+  // Fetch per-service time series metrics (APM)
+  async getServiceMetrics(name, window = "1h") {
+    const response = await api.get(`/api/service_metrics/${name}`, {
+      params: { window },
+    });
+    return response.data;
+  },
+
+  // Database Management
+  async getDatabases() {
+    const response = await api.get("/api/databases");
+    return response.data;
+  },
+
+  async addDatabase({ name, uri }) {
+    const response = await api.post("/api/databases", { name, uri });
+    return response.data;
+  },
+
+  async removeDatabase(name) {
+    const response = await api.delete(`/api/databases`, { params: { name } });
+    return response.data;
+  },
 };
 
 // Utility functions for data processing

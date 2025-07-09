@@ -20,6 +20,10 @@ const Dashboard = () => {
   const [loading, setLoading] = useState(true);
   const [lastUpdated, setLastUpdated] = useState(new Date());
 
+  // --- System Overview State ---
+  const [systemOverview, setSystemOverview] = useState(null);
+  const [sysLoading, setSysLoading] = useState(true);
+
   // Fetch all dashboard data
   const fetchDashboardData = async () => {
     try {
@@ -41,21 +45,267 @@ const Dashboard = () => {
     }
   };
 
+  // Fetch system overview
+  const fetchSystemOverview = async () => {
+    try {
+      setSysLoading(true);
+      const overview = await apiService.getSystemOverview();
+      setSystemOverview(overview);
+    } catch (e) {
+      setSystemOverview(null);
+    } finally {
+      setSysLoading(false);
+    }
+  };
+
   // Auto-refresh every 30 seconds
   useEffect(() => {
     fetchDashboardData();
-    const interval = setInterval(fetchDashboardData, 30000);
+    fetchSystemOverview();
+    const interval = setInterval(() => {
+      fetchDashboardData();
+      fetchSystemOverview();
+    }, 30000);
     return () => clearInterval(interval);
   }, []);
 
   // Manual refresh
   const handleRefresh = () => {
     fetchDashboardData();
+    fetchSystemOverview();
     toast.success("Dashboard refreshed");
   };
 
+  // --- System Overview Card ---
+  const renderSystemOverview = () => {
+    if (sysLoading) {
+      return (
+        <div className="flex-1 flex items-center justify-center h-24">
+          Loading...
+        </div>
+      );
+    }
+    if (!systemOverview) {
+      return (
+        <div className="flex-1 flex items-center justify-center h-24 text-danger-600">
+          Failed to load system overview
+        </div>
+      );
+    }
+    // Determine health color
+    const isHealthy =
+      systemOverview.active_services === systemOverview.total_applications &&
+      systemOverview.system?.every(
+        (sys) => sys.status === "up" || sys.status === "connected"
+      );
+    const sysColor = isHealthy
+      ? "bg-success-50 border-success-200"
+      : "bg-danger-50 border-danger-200";
+    const dbColor =
+      systemOverview.system?.find((sys) => sys.name === "MongoDB")?.status ===
+      "connected"
+        ? "bg-success-50 border-success-200"
+        : "bg-danger-50 border-danger-200";
+    const sysStatus = isHealthy ? "Healthy" : "Issues";
+    const dbStatus =
+      systemOverview.system?.find((sys) => sys.name === "MongoDB")?.status ===
+      "connected"
+        ? "Connected"
+        : "Disconnected";
+    return (
+      <div className="flex flex-col md:flex-row gap-4 w-full">
+        {/* System Overview */}
+        <div
+          className={`flex-1 rounded-2xl p-6 shadow-md border ${sysColor} flex flex-col justify-between min-w-[250px] animate-fadeIn`}
+        >
+          <div className="flex items-center justify-between mb-2">
+            <span className="font-bold text-xl flex items-center">
+              <ServerIcon className="w-6 h-6 mr-2 text-primary-600" /> System
+              Overview
+            </span>
+            <span
+              className={`inline-flex items-center px-2 py-1 rounded-full text-xs font-bold uppercase ml-2 ${
+                isHealthy
+                  ? "bg-success-100 text-success-700"
+                  : "bg-danger-100 text-danger-700"
+              }`}
+            >
+              {isHealthy ? (
+                <ServerIcon className="w-4 h-4 mr-1 text-success-500" />
+              ) : (
+                <ExclamationTriangleIcon className="w-4 h-4 mr-1 text-danger-500" />
+              )}{" "}
+              {sysStatus}
+            </span>
+          </div>
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mt-4 mb-2">
+            <div className="flex flex-col items-center">
+              <span className="text-2xl font-bold text-gray-900">
+                {systemOverview.total_applications}
+              </span>
+              <span className="uppercase text-xs text-gray-500 mt-1">
+                Total Apps
+              </span>
+            </div>
+            <div className="flex flex-col items-center">
+              <span className="text-2xl font-bold text-success-600">
+                {systemOverview.active_services}
+              </span>
+              <span className="uppercase text-xs text-gray-500 mt-1">
+                Active
+              </span>
+            </div>
+            <div className="flex flex-col items-center">
+              <span className="text-2xl font-bold text-danger-600">
+                {systemOverview.inactive_services}
+              </span>
+              <span className="uppercase text-xs text-gray-500 mt-1">
+                Inactive
+              </span>
+            </div>
+            <div className="flex flex-col items-center">
+              {/* Placeholder for avg response time */}
+              <span className="text-2xl font-bold text-gray-900">318ms</span>
+              <span className="uppercase text-xs text-gray-500 mt-1">
+                Avg Response
+              </span>
+            </div>
+          </div>
+          <div className="flex items-center justify-end mt-2 text-xs text-gray-400">
+            Last updated: {lastUpdated.toLocaleTimeString()}
+          </div>
+        </div>
+        {/* Database Connections */}
+        <div
+          className={`flex-1 rounded-2xl p-6 shadow-md border ${dbColor} flex flex-col justify-between min-w-[250px] animate-fadeIn`}
+        >
+          <div className="flex items-center justify-between mb-2">
+            <span className="font-bold text-xl flex items-center">
+              <ChartBarIcon className="w-6 h-6 mr-2 text-primary-600" />{" "}
+              System Status
+            </span>
+            <span
+              className={`inline-flex items-center px-2 py-1 rounded-full text-xs font-bold uppercase ml-2 ${
+                systemOverview.system?.find(sys => sys.name === "MongoDB")?.status === "connected"
+                  ? "bg-success-100 text-success-700"
+                  : "bg-danger-100 text-danger-700"
+              }`}
+            >
+              {systemOverview.system?.find(sys => sys.name === "MongoDB")?.status === "connected" ? (
+                <ServerIcon className="w-4 h-4 mr-1 text-success-500" />
+              ) : (
+                <ExclamationTriangleIcon className="w-4 h-4 mr-1 text-danger-500" />
+              )}{" "}
+              {dbStatus}
+            </span>
+          </div>
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mt-4 mb-2">
+            <div className="flex flex-col items-center">
+              <span className="text-2xl font-bold text-gray-900">
+                {systemOverview.system?.length || 0}
+              </span>
+              <span className="uppercase text-xs text-gray-500 mt-1">
+                Total Systems
+              </span>
+            </div>
+            <div className="flex flex-col items-center">
+              <span className="text-2xl font-bold text-success-600">
+                {
+                  systemOverview.system?.filter(
+                    (sys) => sys.status === "up" || sys.status === "connected"
+                  ).length || 0
+                }
+              </span>
+              <span className="uppercase text-xs text-gray-500 mt-1">
+                Healthy
+              </span>
+            </div>
+            <div className="flex flex-col items-center">
+              <span className="text-2xl font-bold text-danger-600">
+                {
+                  systemOverview.system?.filter(
+                    (sys) => sys.status !== "up" && sys.status !== "connected"
+                  ).length || 0
+                }
+              </span>
+              <span className="uppercase text-xs text-gray-500 mt-1">
+                Issues
+              </span>
+            </div>
+            <div className="flex flex-col items-center">
+              <span
+                className={`text-xs font-bold px-3 py-1 rounded-full ${
+                  systemOverview.system?.find(sys => sys.name === "MongoDB")?.status === "connected"
+                    ? "bg-success-100 text-success-700"
+                    : "bg-danger-100 text-danger-700"
+                }`}
+              >
+                {systemOverview.system?.find(sys => sys.name === "MongoDB")?.status?.toUpperCase() ||
+                  "UNKNOWN"}
+              </span>
+              <span className="uppercase text-xs text-gray-500 mt-1">
+                MongoDB
+              </span>
+            </div>
+          </div>
+          <div className="flex items-center justify-end mt-2 text-xs text-gray-400">
+            Last updated: {lastUpdated.toLocaleTimeString()}
+          </div>
+        </div>
+      </div>
+    );
+  };
+
+  // --- No Data Yet State ---
+  const isEmpty =
+    (!data.summary?.summary?.total || data.summary.summary.total === 0) &&
+    (!data.performance?.throughput?.total_requests ||
+      data.performance.throughput.total_requests === 0) &&
+    (!systemOverview || systemOverview.total_applications === 0);
+
   return (
     <div className="space-y-8 animate-fadeIn">
+      {/* No Data Yet State */}
+      {isEmpty && (
+        <div className="flex flex-col items-center justify-center h-96 text-center bg-white rounded-xl shadow-md border border-gray-100 p-12 animate-fadeIn">
+          <ChartBarIcon className="w-16 h-16 text-primary-300 mb-4" />
+          <h2 className="text-2xl font-bold mb-2 text-gray-900">No Data Yet</h2>
+          <p className="text-gray-600 mb-4 max-w-xl mx-auto">
+            Welcome to AppVital! To get started, register your first service or
+            application using the{" "}
+            <span className="font-semibold">"Register New Application"</span>{" "}
+            form on the Services page. Once registered, metrics and logs will
+            appear here automatically.
+          </p>
+          <a
+            href="/services"
+            className="btn btn-primary inline-flex items-center gap-2 mt-2"
+          >
+            <ServerIcon className="w-5 h-5" /> Register a Service
+          </a>
+        </div>
+      )}
+      {/* System Overview & Database Connections */}
+      <div className="bg-white rounded-xl shadow-md p-6 mb-6 border border-gray-100">
+        <div className="flex items-center justify-between mb-4">
+          <div>
+            <h1 className="text-2xl font-bold text-gray-900">
+              Application Monitor
+            </h1>
+            <p className="text-gray-600">
+              Comprehensive application performance and health monitoring
+              dashboard
+            </p>
+          </div>
+          <div className="flex gap-2">
+            <button className="btn btn-secondary" onClick={handleRefresh}>
+              Refresh
+            </button>
+            <button className="btn btn-success">Start Monitoring</button>
+          </div>
+        </div>
+        {renderSystemOverview()}
+      </div>
       {/* Header */}
       <div className="flex items-center justify-between bg-white/80 backdrop-blur-xs rounded-xl shadow-sm px-6 py-4 mb-4 border border-gray-100">
         <div>

@@ -8,6 +8,8 @@ import Services from "./pages/Services";
 import Logs from "./pages/Logs";
 import Metrics from "./pages/Metrics";
 import Analytics from "./pages/Analytics";
+import ServiceDetails from "./pages/ServiceDetails";
+import DatabaseManagement from "./pages/DatabaseManagement";
 import { MoonIcon, SunIcon } from "@heroicons/react/24/outline";
 
 function App() {
@@ -62,9 +64,11 @@ function App() {
                 <Routes>
                   <Route path="/" element={<Dashboard />} />
                   <Route path="/services" element={<Services />} />
+                  <Route path="/services/:name" element={<ServiceDetails />} />
                   <Route path="/logs" element={<Logs />} />
                   <Route path="/metrics" element={<Metrics />} />
                   <Route path="/analytics" element={<Analytics />} />
+                  <Route path="/databases" element={<DatabaseManagement />} />
                 </Routes>
               </div>
             </div>

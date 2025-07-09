@@ -10,6 +10,7 @@ import {
   CheckCircleIcon,
   ClockIcon,
   CpuChipIcon,
+  CircleStackIcon,
 } from "@heroicons/react/24/outline";
 import { clsx } from "clsx";
 
@@ -43,6 +44,12 @@ const navigation = [
     href: "/analytics",
     icon: CogIcon,
     description: "Advanced analytics",
+  },
+  {
+    name: "Databases",
+    href: "/databases",
+    icon: CircleStackIcon,
+    description: "Database management",
   },
 ];
 
@@ -137,26 +144,38 @@ const Sidebar = ({ open, setOpen }) => {
             {/* Quick status indicators */}
             <div className="space-y-2">
               <div className="flex items-center justify-between text-sm">
-                <span className="text-gray-600 dark:text-gray-300">Overall Health</span>
+                <span className="text-gray-600 dark:text-gray-300">
+                  Overall Health
+                </span>
                 <div className="flex items-center">
                   <div className="w-2 h-2 bg-success-500 rounded-full mr-2"></div>
-                  <span className="text-success-700 dark:text-success-300 font-medium">Healthy</span>
+                  <span className="text-success-700 dark:text-success-300 font-medium">
+                    Healthy
+                  </span>
                 </div>
               </div>
 
               <div className="flex items-center justify-between text-sm">
-                <span className="text-gray-600 dark:text-gray-300">Services</span>
+                <span className="text-gray-600 dark:text-gray-300">
+                  Services
+                </span>
                 <div className="flex items-center">
                   <div className="w-2 h-2 bg-success-500 rounded-full mr-2"></div>
-                  <span className="text-success-700 dark:text-success-300 font-medium">3/3</span>
+                  <span className="text-success-700 dark:text-success-300 font-medium">
+                    3/3
+                  </span>
                 </div>
               </div>
 
               <div className="flex items-center justify-between text-sm">
-                <span className="text-gray-600 dark:text-gray-300">Prometheus</span>
+                <span className="text-gray-600 dark:text-gray-300">
+                  Prometheus
+                </span>
                 <div className="flex items-center">
                   <div className="w-2 h-2 bg-warning-500 rounded-full mr-2"></div>
-                  <span className="text-warning-700 dark:text-warning-300 font-medium">Warning</span>
+                  <span className="text-warning-700 dark:text-warning-300 font-medium">
+                    Warning
+                  </span>
                 </div>
               </div>
             </div>

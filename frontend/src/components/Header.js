@@ -108,9 +108,10 @@ const Header = ({ onMenuClick }) => {
   };
 
   // Bell color logic
-  const bellColor = anomalies.length > 0
-    ? "text-warning-500 hover:text-warning-600 dark:text-warning-400 dark:hover:text-warning-300"
-    : "text-gray-400 hover:text-gray-600 dark:text-gray-300 dark:hover:text-white";
+  const bellColor =
+    anomalies.length > 0
+      ? "text-warning-500 hover:text-warning-600 dark:text-warning-400 dark:hover:text-warning-300"
+      : "text-gray-400 hover:text-gray-600 dark:text-gray-300 dark:hover:text-white";
 
   return (
     <header className="bg-white dark:bg-gray-800 shadow-sm border-b border-gray-200 dark:border-gray-700">
@@ -127,7 +128,7 @@ const Header = ({ onMenuClick }) => {
 
           <div className="ml-4 lg:ml-0">
             <h1 className="text-xl font-semibold text-gray-900 dark:text-gray-100">
-              Health Monitoring Dashboard
+              AppVital
             </h1>
           </div>
         </div>
@@ -220,7 +221,13 @@ const Header = ({ onMenuClick }) => {
             <button
               type="button"
               className={`p-2 transition-colors duration-200 relative ${bellColor}`}
-              title={anomalies.length > 0 ? `${anomalies.length} anomaly${anomalies.length > 1 ? "ies" : "y"} detected` : "Notifications"}
+              title={
+                anomalies.length > 0
+                  ? `${anomalies.length} anomaly${
+                      anomalies.length > 1 ? "ies" : "y"
+                    } detected`
+                  : "Notifications"
+              }
               onClick={() => setPopoverOpen((v) => !v)}
               aria-label="Show anomalies"
             >
@@ -238,7 +245,9 @@ const Header = ({ onMenuClick }) => {
                   <div className="flex items-center mb-2">
                     <ExclamationTriangleIcon className="w-5 h-5 text-warning-500 mr-2" />
                     <span className="font-semibold text-gray-900 dark:text-gray-100">
-                      {anomalies.length > 0 ? "Active Anomalies" : "No Active Anomalies"}
+                      {anomalies.length > 0
+                        ? "Active Anomalies"
+                        : "No Active Anomalies"}
                     </span>
                   </div>
                   {anomalies.length > 0 ? (
