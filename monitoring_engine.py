@@ -1,24 +1,27 @@
 import asyncio
-import requests
 import logging
-from pathlib import Path, Path as FilePath
+from pathlib import Path
 from typing import List, Dict, Any
-from fastapi import FastAPI, BackgroundTasks, HTTPException, Query, Request, Path
+from fastapi import FastAPI, BackgroundTasks, HTTPException, Query, Depends
 from fastapi.responses import JSONResponse
+from pydantic import BaseModel, EmailStr
 import httpx
 import time
 import re
 import os
 import json
+import hashlib
+import jwt
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta
 from fastapi.middleware.cors import CORSMiddleware
 import psutil
 from dateutil import parser as dateutil_parser
 from collections import defaultdict
-import threading
-from prometheus_client.parser import text_string_to_metric_families
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+from pymongo import MongoClient
 import pymongo
+from passlib.hash import bcrypt
 
 # Optional: pip install ollama
 try:
@@ -34,26 +37,7 @@ except ImportError:
     SendGridAPIClient = None
     Mail = None
 
-# --- Registered Service Time Series Storage ---
-from collections import deque
-
-REGISTERED_METRICS_HISTORY = {}  # {service: {metric: deque[(timestamp, value)]}}
-MAX_HISTORY_SECONDS = 24 * 3600  # 24 hours
-
-# Helper: update time series for a metric
-def update_metric_history(service, metric, value, timestamp=None):
-    if service not in REGISTERED_METRICS_HISTORY:
-        REGISTERED_METRICS_HISTORY[service] = {}
-    if metric not in REGISTERED_METRICS_HISTORY[service]:
-        REGISTERED_METRICS_HISTORY[service][metric] = deque()
-    ts = timestamp or time.time()
-    dq = REGISTERED_METRICS_HISTORY[service][metric]
-    dq.append((ts, value))
-    # Remove old data
-    while dq and dq[0][0] < ts - MAX_HISTORY_SECONDS:
-        dq.popleft()
-
-LOG_PATH = FilePath("logs/metrics.log")
+LOG_PATH = Path("/app/logs/metrics.log")
 PROMETHEUS_URL = os.getenv("PROMETHEUS_URL", "http://prometheus:9090")
 OLLAMA_URL = os.getenv("OLLAMA_URL", "http://host.docker.internal:11434")
 OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "llama3")
@@ -64,23 +48,156 @@ SENDGRID_API_KEY = os.getenv("SENDGRID_API_KEY")
 ALERT_EMAIL_FROM = os.getenv("ALERT_EMAIL_FROM")
 ALERT_EMAIL_TO = os.getenv("ALERT_EMAIL_TO")
 
-REGISTERED_SERVICES_FILE = "/app/data/registered_services.json"
-registered_services = {}  # {name: url}
-registered_metrics = {}   # {name: {metrics_dict}}
+user_service_metrics = {}  # {service_name: {metrics, status, last_scraped, error}}
 
-REGISTERED_DATABASES_FILE = "data/registered_databases.json"
-registered_databases = {}
-database_statuses = {}
+async def background_user_service_metrics_scraper():
+    """Periodically scrape /metrics from user-registered services and cache results."""
+    global user_service_metrics
+    while True:
+        try:
+            # Get all registered services from all users
+            all_services = list(services_collection.find({}))
+            for svc in all_services:
+                name = svc["name"]
+                url = svc["url"].rstrip("/")
+                owner = svc["owner"]
+                metrics_url = f"{url}/metrics"
+                try:
+                    async with httpx.AsyncClient(timeout=5.0) as client:
+                        resp = await client.get(metrics_url)
+                    if resp.status_code == 200:
+                        # Parse Prometheus metrics text format
+                        metrics = parse_prometheus_metrics(resp.text)
+                        user_service_metrics[name] = {
+                            "metrics": metrics,
+                            "status": "healthy",
+                            "last_scraped": time.time(),
+                            "error": None,
+                            "owner": owner,
+                            "url": url
+                        }
+                    else:
+                        user_service_metrics[name] = {
+                            "metrics": {},
+                            "status": "unhealthy",
+                            "last_scraped": time.time(),
+                            "error": f"Status {resp.status_code}",
+                            "owner": owner,
+                            "url": url
+                        }
+                except Exception as e:
+                    user_service_metrics[name] = {
+                        "metrics": {},
+                        "status": "unhealthy",
+                        "last_scraped": time.time(),
+                        "error": str(e),
+                        "owner": owner,
+                        "url": url
+                    }
+        except Exception as e:
+            print(f"[User Service Metrics Scraper] Error: {e}")
+        await asyncio.sleep(30)  # Scrape every 30 seconds
+
+# Add a new function to scrape metrics for a specific user
+async def scrape_metrics_for_user(user_email: str):
+    """Scrape metrics for a specific user's services."""
+    services = get_registered_services_for_user(user_email)
+    for svc in services:
+        name = svc["name"]
+        url = svc["url"].rstrip("/")
+        metrics_url = f"{url}/metrics"
+        try:
+            async with httpx.AsyncClient(timeout=5.0) as client:
+                resp = await client.get(metrics_url)
+            if resp.status_code == 200:
+                metrics = parse_prometheus_metrics(resp.text)
+                user_service_metrics[name] = {
+                    "metrics": metrics,
+                    "status": "healthy",
+                    "last_scraped": time.time(),
+                    "error": None,
+                    "owner": user_email,
+                    "url": url
+                }
+            else:
+                user_service_metrics[name] = {
+                    "metrics": {},
+                    "status": "unhealthy",
+                    "last_scraped": time.time(),
+                    "error": f"Status {resp.status_code}",
+                    "owner": user_email,
+                    "url": url
+                }
+        except Exception as e:
+            user_service_metrics[name] = {
+                "metrics": {},
+                "status": "unhealthy",
+                "last_scraped": time.time(),
+                "error": str(e),
+                "owner": user_email,
+                "url": url
+            }
+
+def parse_prometheus_metrics(metrics_text):
+    """Parse Prometheus text format into a dict of metric_name: value."""
+    metrics = {}
+    # Track metrics that need to be summed (like http_requests_total with different labels)
+    summable_metrics = {}
+    
+    for line in metrics_text.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        try:
+            parts = line.split()
+            if len(parts) == 2:
+                key, value = parts
+                # Check if this is a metric with labels
+                if "{" in key:
+                    # Extract the base metric name (without labels)
+                    base_key = key.split("{")[0]
+                    # For metrics that should be summed across all labels
+                    if base_key in ["http_requests_total", "errors_total"]:
+                        if base_key not in summable_metrics:
+                            summable_metrics[base_key] = 0
+                        summable_metrics[base_key] += float(value)
+                    else:
+                        # For other metrics with labels, keep the last value (existing behavior)
+                        metrics[base_key] = float(value)
+                else:
+                    # No labels, store directly
+                    metrics[key] = float(value)
+        except Exception:
+            continue
+
+    # Add the summed metrics to the result
+    for metric_name, total_value in summable_metrics.items():
+        metrics[metric_name] = total_value
+
+    # --- Compute average latency (seconds) ---
+    avg_latency = None
+    for prefix in ["http_request_duration_seconds", "total_response_ms"]:
+        sum_key = f"{prefix}_sum"
+        count_key = f"{prefix}_count"
+        if sum_key in metrics and count_key in metrics and metrics[count_key] > 0:
+            avg = metrics[sum_key] / metrics[count_key]
+            # If using ms, convert to seconds for consistency
+            if prefix == "total_response_ms":
+                avg = avg / 1000.0
+            avg_latency = avg
+            break
+    if avg_latency is not None:
+        metrics["avg_latency"] = avg_latency
+
+    return metrics
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    task = asyncio.create_task(background_log_scanner())
-    load_registered_services()
-    threading.Thread(target=scrape_registered_services, daemon=True).start()
-    load_registered_databases()
-    threading.Thread(target=background_database_health_checker, daemon=True).start()
+    task1 = asyncio.create_task(background_log_scanner())
+    task2 = asyncio.create_task(background_user_service_metrics_scraper())
     yield
-    task.cancel()
+    task1.cancel()
+    task2.cancel()
 
 app = FastAPI(lifespan=lifespan)
 
@@ -105,6 +222,33 @@ CACHE_TTL_SECONDS = 120  # 2 minutes
 
 # Track sent anomalies to avoid duplicate emails (in-memory, resets on restart)
 sent_anomalies = set()
+
+# --- Authentication Models and Functions ---
+class RegisterModel(BaseModel):
+    email: EmailStr
+    password: str
+
+class LoginModel(BaseModel):
+    email: EmailStr
+    password: str
+
+# In-memory user storage (in production, use a database)
+users_db = {}
+
+def hash_password(password: str) -> str:
+    """Hash a password using SHA-256"""
+    return hashlib.sha256(password.encode()).hexdigest()
+
+def verify_password(password: str, hashed: str) -> bool:
+    """Verify a password against its hash"""
+    return hash_password(password) == hashed
+
+def create_access_token(data: dict) -> str:
+    """Create a JWT access token"""
+    secret = os.getenv("JWT_SECRET", "mysecretkey")
+    payload = data.copy()
+    payload.update({"exp": datetime.utcnow() + timedelta(hours=24)})
+    return jwt.encode(payload, secret, algorithm="HS256")
 
 def send_email_alert(subject, content):
     if not (SENDGRID_API_KEY and ALERT_EMAIL_FROM and ALERT_EMAIL_TO):
@@ -187,10 +331,10 @@ def parse_log_line(line: str) -> Dict[str, Any]:
 def load_logs() -> List[Dict[str, Any]]:
     """Load and parse logs from all service log files"""
     log_files = [
-        FilePath("logs/metrics.log"),  # Main log file (controller)
-        FilePath("logs/auth_service.log"),  # Auth service logs
-        FilePath("logs/catalog_service.log"),  # Catalog service logs
-        FilePath("logs/order_service.log"),  # Order service logs
+        Path("/app/logs/metrics.log"),  # Main log file (controller)
+        Path("/app/logs/auth_service.log"),  # Auth service logs
+        Path("/app/logs/catalog_service.log"),  # Catalog service logs
+        Path("/app/logs/order_service.log"),  # Order service logs
     ]
     
     logs = []
@@ -662,6 +806,36 @@ async def background_log_scanner():
         
         await asyncio.sleep(30)  # Update every 30 seconds
 
+# --- Authentication Endpoints ---
+@app.post("/register")
+async def register_user(data: RegisterModel):
+    """Register a new user (persistent, MongoDB)"""
+    existing = users_collection.find_one({"email": data.email})
+    if existing:
+        return {"status": "error", "msg": "Email already registered"}
+    hashed_pw = bcrypt.hash(data.password)
+    user_doc = {
+        "email": data.email,
+        "passwordHash": hashed_pw,
+        "createdAt": datetime.utcnow(),
+        "lastLoginAt": None,
+        "sessionCount": 0
+    }
+    users_collection.insert_one(user_doc)
+    return {"status": "success", "msg": "User registered successfully"}
+
+@app.post("/login")
+async def login_user(data: LoginModel):
+    """Login a user (persistent, MongoDB)"""
+    user = users_collection.find_one({"email": data.email})
+    if not user or not bcrypt.verify(data.password, user["passwordHash"]):
+        return {"status": "error", "msg": "Invalid credentials"}
+    # Update user stats
+    users_collection.update_one({"_id": user["_id"]}, {"$set": {"lastLoginAt": datetime.utcnow()}, "$inc": {"sessionCount": 1}})
+    # Create JWT token
+    token = create_access_token({"email": data.email})
+    return {"status": "success", "access_token": token}
+
 # --- API Endpoints ---
 @app.get("/api/summary")
 async def api_summary():
@@ -901,7 +1075,7 @@ async def api_ollama_test():
             "model": OLLAMA_MODEL
         }
 
-def tail_log_file(path: FilePath, n: int) -> list:
+def tail_log_file(path: Path, n: int) -> list:
     """Efficiently read the last n lines from a file."""
     with path.open('rb') as f:
         f.seek(0, 2)
@@ -964,7 +1138,7 @@ async def api_logs(
 @app.get("/api/services")
 async def api_services():
     """Return per-service metrics: uptime, avg response time, latency, memory, cpu, error rate, status"""
-    registered = list(registered_services.keys())
+    service_names = ["auth_service", "catalog_service", "order_service"]
     now = datetime.now()
     service_metrics = {}
     prom_metrics = prometheus_metrics
@@ -982,10 +1156,15 @@ async def api_services():
                 except Exception:
                     continue
         return 0
-    for name in registered:
+    for name in service_names:
         logs = [log for log in parsed_logs if log.get("service") == name]
         errors = [log for log in logs if log.get("level") == "ERROR"]
-        latencies = [log.get("latency_ms") if log.get("latency_ms") is not None else log.get("duration_ms") for log in logs if log.get("latency_ms") is not None or log.get("duration_ms") is not None]
+        latencies = [
+            (log.get("latency_ms") if log.get("latency_ms") is not None else log.get("duration_ms"))
+            for log in logs
+            if (log.get("latency_ms") is not None or log.get("duration_ms") is not None)
+        ]
+        latencies = [l for l in latencies if l is not None]
         avg_latency = sum(latencies) / len(latencies) if latencies else None
         # Uptime: use process_start_time_seconds from Prometheus
         process_start_time = get_prom_value("process_start_time_seconds", name)
@@ -1008,6 +1187,212 @@ async def api_services():
             "errors": len(errors),
         }
     return {"services": list(service_metrics.values())}
+
+# MongoDB setup for per-user service registration
+MONGO_URI = os.getenv("MONGO_URI", "mongodb://admin:secret@mongodb:27017")
+mongo_client = MongoClient(MONGO_URI)
+mongo_db = mongo_client[os.getenv("MONGO_DB", "appvital")]
+services_collection = mongo_db["registered_services"]
+logs_collection = mongo_db["logs"]  # <-- Add this line
+users_collection = mongo_db["users"]  # <-- Add this line
+
+security = HTTPBearer()
+
+def get_current_user_email(credentials: HTTPAuthorizationCredentials = Depends(security)):
+    token = credentials.credentials
+    try:
+        secret = os.getenv("JWT_SECRET", "mysecretkey")
+        payload = jwt.decode(token, secret, algorithms=["HS256"])
+        return payload["email"]
+    except Exception:
+        raise HTTPException(status_code=401, detail="Invalid or expired token")
+
+def get_registered_services_for_user(user_email: str):
+    return list(services_collection.find({"owner": user_email}))
+
+def mongo_to_dict(doc):
+    doc = dict(doc)
+    if "_id" in doc:
+        doc["_id"] = str(doc["_id"])
+    return doc
+
+@app.get("/api/registered_services")
+async def api_registered_services(user_email: str = Depends(get_current_user_email)):
+    """Return registered services for the current user (MongoDB) with live metrics and status"""
+    # Trigger metrics scraping for this user
+    await scrape_metrics_for_user(user_email)
+    
+    services = get_registered_services_for_user(user_email)
+    result = []
+    for svc in services:
+        svc_dict = mongo_to_dict(svc)
+        name = svc_dict["name"]
+        metrics_info = user_service_metrics.get(name, {})
+        result.append({
+            "name": svc_dict["name"],
+            "url": svc_dict["url"],
+            "createdAt": svc_dict.get("createdAt"),
+            "owner": svc_dict["owner"],
+            "_id": svc_dict["_id"],
+            "status": metrics_info.get("status", "unknown"),
+            "metrics": metrics_info.get("metrics", {}),
+            "last_scraped": metrics_info.get("last_scraped"),
+            "error": metrics_info.get("error")
+        })
+    return {"registered_services": result}
+
+@app.post("/api/registered_services")
+async def register_service(data: dict, user_email: str = Depends(get_current_user_email)):
+    """Register a new service for the current user (MongoDB)"""
+    name = data.get('name')
+    url = data.get('url')
+    if not name or not url:
+        return {"status": "error", "message": "Name and URL are required"}
+    # Check if service already exists for this user
+    existing = services_collection.find_one({"name": name, "owner": user_email})
+    if existing:
+        return {"status": "error", "message": f"Service '{name}' already exists"}
+    doc = {
+        "name": name,
+        "url": url,
+        "owner": user_email,
+        "createdAt": datetime.utcnow()
+    }
+    services_collection.insert_one(doc)
+    return {"status": "success", "message": f"Service '{name}' registered successfully"}
+
+@app.post("/api/demo/register_services")
+async def register_demo_services(data: dict):
+    """Register demo services without authentication (only in demo mode)"""
+    if os.getenv("DEMO_MODE") != "1":
+        raise HTTPException(status_code=403, detail="Demo mode only")
+    
+    name = data.get('name')
+    url = data.get('url')
+    if not name or not url:
+        return {"status": "error", "message": "Name and URL are required"}
+    
+    # Check if service already exists (demo services are global)
+    existing = services_collection.find_one({"name": name})
+    if existing:
+        return {"status": "error", "message": f"Service '{name}' already exists"}
+    
+    doc = {
+        "name": name,
+        "url": url,
+        "owner": "demo_user",  # Special owner for demo services
+        "createdAt": datetime.utcnow(),
+        "is_demo": True
+    }
+    services_collection.insert_one(doc)
+    return {"status": "success", "message": f"Demo service '{name}' registered successfully"}
+
+@app.delete("/api/registered_services")
+async def delete_registered_service(name: str, user_email: str = Depends(get_current_user_email)):
+    """Delete a registered service for the current user (MongoDB)"""
+    result = services_collection.delete_one({"name": name, "owner": user_email})
+    if result.deleted_count == 0:
+        return {"status": "error", "message": f"Service '{name}' not found for user"}
+    return {"status": "success", "message": f"Service '{name}' deleted successfully"}
+
+@app.get("/api/test_metrics_endpoint")
+async def test_metrics_endpoint(url: str):
+    """Test if a metrics endpoint is accessible"""
+    try:
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            response = await client.get(f"{url}/metrics")
+            if response.status_code == 200:
+                return {"success": True, "message": "Metrics endpoint is accessible"}
+            else:
+                return {"success": False, "message": f"Metrics endpoint returned status {response.status_code}"}
+    except Exception as e:
+        return {"success": False, "message": f"Cannot connect to metrics endpoint: {str(e)}"}
+
+@app.get("/api/system_overview")
+async def api_system_overview(user_email: str = Depends(get_current_user_email)):
+    # Trigger metrics scraping for this user
+    await scrape_metrics_for_user(user_email)
+    
+    services_response = get_registered_services_for_user(user_email)
+    services = []
+    for svc in services_response:
+        svc_dict = mongo_to_dict(svc)
+        name = svc_dict["name"]
+        metrics_info = user_service_metrics.get(name, {})
+        services.append({
+            "name": svc_dict["name"],
+            "url": svc_dict["url"],
+            "createdAt": svc_dict.get("createdAt"),
+            "owner": svc_dict["owner"],
+            "_id": svc_dict["_id"],
+            "status": metrics_info.get("status", "unknown"),
+            "metrics": metrics_info.get("metrics", {}),
+            "last_scraped": metrics_info.get("last_scraped"),
+            "error": metrics_info.get("error")
+        })
+    healthy_count = len([s for s in services if s.get("status") == "healthy"])
+    unhealthy_count = len([s for s in services if s.get("status") != "healthy"])
+    return {
+        "total_applications": len(services),
+        "services": services,
+        "databases": {
+            "total": 1,  # MongoDB
+            "connected": 1,
+            "disconnected": 0,
+            "details": [
+                {
+                    "name": "MongoDB",
+                    "status": "connected"
+                }
+            ]
+        }
+    }
+
+@app.get("/api/databases")
+async def api_databases():
+    """Return registered databases"""
+    return {
+        "databases": [
+            {"name": "MongoDB", "uri": "mongodb://admin:secret@mongodb:27017", "status": "connected"}
+        ]
+    }
+
+@app.post("/api/databases")
+async def add_database(data: dict):
+    """Add a new database"""
+    return {"status": "success", "message": f"Database {data.get('name')} added successfully"}
+
+@app.delete("/api/databases")
+async def remove_database(name: str):
+    """Remove a database"""
+    return {"status": "success", "message": f"Database {name} removed successfully"}
+
+@app.post("/api/ingest_log")
+async def ingest_logs(data: dict):
+    """Ingest logs from services"""
+    try:
+        logs = data.get("logs", [])
+        if not logs:
+            return {"status": "error", "message": "No logs provided"}
+        # Insert logs into MongoDB
+        if logs:
+            logs_collection.insert_many(logs)
+        # Add logs to the parsed_logs list for analysis (optional, keep for in-memory analytics)
+        for log in logs:
+            parsed_logs.append(log)
+        return {"status": "success", "message": f"Successfully ingested {len(logs)} logs"}
+    except Exception as e:
+        return {"status": "error", "message": f"Failed to ingest logs: {str(e)}"}
+
+@app.post("/api/ingest_single_log")
+async def ingest_single_log(log_entry: dict):
+    """Ingest a single log entry"""
+    try:
+        logs_collection.insert_one(log_entry)
+        parsed_logs.append(log_entry)
+        return {"status": "success", "message": "Log ingested successfully"}
+    except Exception as e:
+        return {"status": "error", "message": f"Failed to ingest log: {str(e)}"}
 
 @app.get("/api/debug/service-log-counts")
 async def api_debug_service_log_counts():
@@ -1053,14 +1438,12 @@ async def api_debug_log_sample():
 
 @app.get("/api/debug/service-error-counts")
 async def api_debug_service_error_counts():
-    # Count ERROR logs per registered service only
+    # Count ERROR logs per service
     error_counts = {}
-    registered = set(registered_services.keys())
     for log in parsed_logs:
         if log.get("level") == "ERROR":
             service = log.get("service", "unknown")
-            if service in registered:
-                error_counts[service] = error_counts.get(service, 0) + 1
+            error_counts[service] = error_counts.get(service, 0) + 1
     return {"service_error_counts": error_counts}
 
 @app.get("/api/metrics/error_rate_timeseries")
@@ -1366,305 +1749,375 @@ async def response_code_distribution(
         code_counts[code] = code_counts.get(code, 0) + 1
     return code_counts
 
-@app.get("/api/test_metrics_endpoint")
-async def test_metrics_endpoint(url: str = Query(..., description="Base URL of the service")):
-    try:
-        resp = requests.get(f"{url.rstrip('/')}/metrics", timeout=5)
-        if resp.status_code == 200:
-            # Optionally, parse and return a sample of metrics
-            return {"success": True, "message": "Metrics endpoint reachable!", "sample": resp.text[:500]}
-        else:
-            return {"success": False, "message": f"Received status code {resp.status_code}"}
-    except Exception as e:
-        return {"success": False, "message": str(e)}
-
-@app.get("/api/system_overview")
-async def api_system_overview():
-    # Registered services only
-    registered = list(registered_services.keys())
-    total_apps = len(registered)
-    up = 0
-    down = 0
-    service_statuses = []
-    # Registered services
-    for s in registered:
-        status = registered_metrics.get(s, {}).get("status", "unknown")
-        if status == "healthy":
-            up += 1
-            service_statuses.append({"name": s, "status": "up"})
-        else:
-            down += 1
-            service_statuses.append({"name": s, "status": "down"})
-    # Backend (monitoring_engine) status
-    backend_status = "up"
-    try:
-        # Simple health check on self
-        import requests
-        resp = requests.get("http://localhost:8000/api/health", timeout=2)
-        if resp.status_code != 200:
-            backend_status = "down"
-    except Exception:
-        backend_status = "down"
-    # Database status (MongoDB)
-    db_status = []
-    try:
-        client = pymongo.MongoClient(os.getenv("MONGO_URI", "mongodb://admin:secret@mongodb:27017"), serverSelectionTimeoutMS=2000)
-        client.admin.command('ping')
-        db_status.append({"name": "MongoDB", "status": "connected"})
-    except Exception:
-        db_status.append({"name": "MongoDB", "status": "disconnected"})
-    return {
-        "total_applications": total_apps,
-        "active_services": up,
-        "inactive_services": down,
-        "services": service_statuses,
-        "system": [
-            {"name": "Backend", "status": backend_status},
-            *db_status
-        ]
-    }
-
 # --- Expandable: Add more endpoints or analysis as needed --- 
 
-def load_registered_services():
-    global registered_services
-    if os.path.exists(REGISTERED_SERVICES_FILE):
-        try:
-            with open(REGISTERED_SERVICES_FILE, "r") as f:
-                registered_services = json.load(f)
-        except Exception:
-            registered_services = {}
-    else:
-        registered_services = {}
-
-def save_registered_services():
-    with open(REGISTERED_SERVICES_FILE, "w") as f:
-        json.dump(registered_services, f)
-
-def scrape_registered_services():
-    while True:
-        for name, url in registered_services.items():
-            try:
-                resp = requests.get(f"{url.rstrip('/')}/metrics", timeout=5)
-                metrics = {}
-                now = time.time()
-                if resp.status_code == 200:
-                    # Temporary storage for histogram sums/counts
-                    hist_sums = {}
-                    hist_counts = {}
-                    # --- Aggregation for http_requests_total and errors_total ---
-                    http_requests_total_sum = 0
-                    errors_total_sum = 0
-                    for family in text_string_to_metric_families(resp.text):
-                        for sample in family.samples:
-                            # Aggregate http_requests_total across all status codes
-                            if sample.name == "http_requests_total":
-                                http_requests_total_sum += float(sample.value)
-                            # Aggregate errors_total across all labels
-                            if sample.name == "errors_total":
-                                errors_total_sum += float(sample.value)
-                            metrics[sample.name] = sample.value
-                            # Store time series for key metrics
-                            if sample.name in [
-                                "ttfb_ms", "server_processing_ms", "db_query_ms", "total_response_ms",
-                                "cpu_percent", "memory_used_mb", "errors_total", "http_requests_total"
-                            ]:
-                                update_metric_history(name, sample.name, sample.value, now)
-                            # Collect histogram _sum/_count for averages
-                            for base in ["ttfb_ms", "server_processing_ms", "db_query_ms", "total_response_ms"]:
-                                if sample.name == f"{base}_sum":
-                                    hist_sums[base] = sample.value
-                                elif sample.name == f"{base}_count":
-                                    hist_counts[base] = sample.value
-                    # Store aggregated totals for error rate calculation
-                    metrics["http_requests_total"] = http_requests_total_sum
-                    metrics["errors_total"] = errors_total_sum
-                    # Calculate averages for histograms
-                    for base in ["ttfb_ms", "server_processing_ms", "db_query_ms", "total_response_ms"]:
-                        s = hist_sums.get(base)
-                        c = hist_counts.get(base)
-                        if s is not None and c and float(c) > 0:
-                            avg = float(s) / float(c)
-                            metrics[base] = avg
-                            update_metric_history(name, base, avg, now)
-                        else:
-                            metrics[base] = None
-                registered_metrics[name] = {
-                    "url": url,
-                    "metrics": metrics,
-                    "last_scraped": now,
-                    "status": "healthy"
-                }
-            except Exception as e:
-                registered_metrics[name] = {
-                    "url": url,
-                    "metrics": {},
-                    "last_scraped": time.time(),
-                    "status": "unhealthy",
-                    "error": str(e)
-                }
-        time.sleep(15)
-
-# Start background scraper thread on startup
-load_registered_services()
-threading.Thread(target=scrape_registered_services, daemon=True).start()
-
-@app.post("/api/registered_services")
-async def register_service(request: Request):
-    data = await request.json()
-    name = data.get("name")
-    url = data.get("url")
-    if not name or not url:
-        return JSONResponse({"error": "Missing name or url"}, status_code=400)
-    registered_services[name] = url
-    save_registered_services()
-    return {"status": "registered", "name": name, "url": url}
-
-@app.get("/api/registered_services")
-async def get_registered_services():
-    # Return all registered services and their latest metrics
-    result = []
-    for name, url in registered_services.items():
-        entry = {
-            "name": name,
-            "url": url,
-            "metrics": registered_metrics.get(name, {}).get("metrics", {}),
-            "status": registered_metrics.get(name, {}).get("status", "unknown"),
-            "last_scraped": registered_metrics.get(name, {}).get("last_scraped"),
-            "error": registered_metrics.get(name, {}).get("error")
-        }
-        result.append(entry)
-    return {"registered_services": result}
-
-@app.delete("/api/registered_services")
-async def delete_registered_service(name: str):
-    if name not in registered_services:
-        raise HTTPException(status_code=404, detail="Service not found")
-    del registered_services[name]
-    save_registered_services()
-    if name in registered_metrics:
-        del registered_metrics[name]
-    return {"status": "deleted", "name": name}
-
-# --- New API endpoint for registered service time series ---
-
-@app.get("/api/service_metrics/{name}")
-async def api_service_metrics(
-    name: str = Path(..., description="Service name"),
-    window: str = Query("1h", description="Time window: 1h, 6h, 24h")
-):
-    # Parse window
-    now = time.time()
-    if window.endswith("h"):
-        window_td = int(window[:-1]) * 3600
-    elif window.endswith("m"):
-        window_td = int(window[:-1]) * 60
-    else:
-        window_td = 3600
-    start_ts = now - window_td
-    # Key metrics to return
-    metrics_list = [
-        "ttfb_ms", "server_processing_ms", "db_query_ms", "total_response_ms",
-        "cpu_percent", "memory_used_mb", "errors_total", "http_requests_total"
-    ]
-    result = {}
-    history = REGISTERED_METRICS_HISTORY.get(name, {})
-    for metric in metrics_list:
-        dq = history.get(metric, deque())
-        # Filter by window
-        filtered = [(ts, float(val)) for ts, val in dq if ts >= start_ts]
-        result[metric] = [
-            {"timestamp": ts, "value": val} for ts, val in filtered
-        ]
-    return {"service": name, "metrics": result, "window": window}
-
-def load_registered_databases():
-    global registered_databases
-    if os.path.exists(REGISTERED_DATABASES_FILE):
-        try:
-            with open(REGISTERED_DATABASES_FILE, "r") as f:
-                registered_databases = json.load(f)
-        except Exception:
-            registered_databases = {}
-    else:
-        registered_databases = {}
-
-def save_registered_databases():
-    with open(REGISTERED_DATABASES_FILE, "w") as f:
-        json.dump(registered_databases, f)
-
-def check_database_health(name, uri):
-    status = {
-        "name": name,
-        "uri": uri,
-        "status": "disconnected",
-        "response_time_ms": None,
-        "host": None,
-        "port": None,
-        "error": None,
-        "last_checked": datetime.utcnow().isoformat() + "Z"
-    }
+@app.get("/api/all_registered_services")
+async def api_all_registered_services():
+    """Return ALL registered services from ALL users (for controller/demo purposes)"""
     try:
-        start = time.time()
-        client = pymongo.MongoClient(uri, serverSelectionTimeoutMS=2000)
-        info = client.server_info()
-        end = time.time()
-        status["status"] = "connected"
-        status["response_time_ms"] = int((end - start) * 1000)
-        parsed = pymongo.uri_parser.parse_uri(uri)
-        status["host"] = parsed.get("nodelist", [(None, None)])[0][0]
-        status["port"] = parsed.get("nodelist", [(None, None)])[0][1]
+        # Get all registered services from all users
+        all_services = list(services_collection.find({}))
+        result = []
+        for svc in all_services:
+            svc_dict = mongo_to_dict(svc)
+            name = svc_dict["name"]
+            metrics_info = user_service_metrics.get(name, {})
+            result.append({
+                "name": svc_dict["name"],
+                "url": svc_dict["url"],
+                "createdAt": svc_dict.get("createdAt"),
+                "owner": svc_dict["owner"],
+                "_id": svc_dict["_id"],
+                "status": metrics_info.get("status", "unknown"),
+                "metrics": metrics_info.get("metrics", {}),
+                "last_scraped": metrics_info.get("last_scraped"),
+                "error": metrics_info.get("error")
+            })
+        return {"registered_services": result}
     except Exception as e:
-        status["error"] = str(e)
-    return status
+        print(f"Error in api_all_registered_services: {e}")
+        return {"registered_services": [], "error": str(e)}
 
-def background_database_health_checker():
-    while True:
-        for name, uri in registered_databases.items():
-            database_statuses[name] = check_database_health(name, uri)
-        time.sleep(10)
+@app.get("/api/test_endpoint")
+async def test_endpoint():
+    """Simple test endpoint to verify backend is working"""
+    return {"message": "Backend is working", "timestamp": datetime.utcnow().isoformat()}
 
-# Start background thread for DB health
-threading.Thread(target=background_database_health_checker, daemon=True).start()
+@app.get("/api/service_metrics/{service_name}")
+async def api_service_metrics(
+    service_name: str,
+    window: str = Query("1h", description="Time window, e.g. 1h, 6h, 24h"),
+    user_email: str = Depends(get_current_user_email)
+):
+    """Get detailed metrics for a specific service"""
+    try:
+        # Get the service from user_service_metrics
+        service_data = user_service_metrics.get(service_name, {})
+        
+        if not service_data:
+            raise HTTPException(status_code=404, detail=f"Service {service_name} not found")
+        
+        # Get the service from database to verify ownership
+        service_doc = services_collection.find_one({"name": service_name, "owner": user_email})
+        if not service_doc:
+            raise HTTPException(status_code=404, detail=f"Service {service_name} not found")
+        
+        # Convert window to seconds for Prometheus queries
+        window_seconds = {
+            "1h": 3600,
+            "6h": 21600,
+            "24h": 86400
+        }.get(window, 3600)
+        
+        # Get time series data from Prometheus
+        metrics_data = {}
+        
+        # HTTP Requests Total
+        try:
+            response = await httpx.get(
+                f"{PROMETHEUS_URL}/api/v1/query_range",
+                params={
+                    "query": f'http_requests_total{{service="{service_name}"}}',
+                    "start": time.time() - window_seconds,
+                    "end": time.time(),
+                    "step": "60"  # 1 minute intervals
+                },
+                timeout=10
+            )
+            if response.status_code == 200:
+                data = response.json()
+                if data.get("status") == "success" and data.get("data", {}).get("result"):
+                    metrics_data["http_requests_total"] = data["data"]["result"][0]["values"]
+        except Exception as e:
+            print(f"Error fetching http_requests_total: {e}")
+        
+        # Errors Total
+        try:
+            response = await httpx.get(
+                f"{PROMETHEUS_URL}/api/v1/query_range",
+                params={
+                    "query": f'errors_total{{service="{service_name}"}}',
+                    "start": time.time() - window_seconds,
+                    "end": time.time(),
+                    "step": "60"
+                },
+                timeout=10
+            )
+            if response.status_code == 200:
+                data = response.json()
+                if data.get("status") == "success" and data.get("data", {}).get("result"):
+                    metrics_data["errors_total"] = data["data"]["result"][0]["values"]
+        except Exception as e:
+            print(f"Error fetching errors_total: {e}")
+        
+        # CPU Usage
+        try:
+            response = await httpx.get(
+                f"{PROMETHEUS_URL}/api/v1/query_range",
+                params={
+                    "query": f'cpu_percent{{service="{service_name}"}}',
+                    "start": time.time() - window_seconds,
+                    "end": time.time(),
+                    "step": "60"
+                },
+                timeout=10
+            )
+            if response.status_code == 200:
+                data = response.json()
+                if data.get("status") == "success" and data.get("data", {}).get("result"):
+                    metrics_data["cpu_percent"] = data["data"]["result"][0]["values"]
+        except Exception as e:
+            print(f"Error fetching cpu_percent: {e}")
+        
+        # Memory Usage
+        try:
+            response = await httpx.get(
+                f"{PROMETHEUS_URL}/api/v1/query_range",
+                params={
+                    "query": f'memory_used_mb{{service="{service_name}"}}',
+                    "start": time.time() - window_seconds,
+                    "end": time.time(),
+                    "step": "60"
+                },
+                timeout=10
+            )
+            if response.status_code == 200:
+                data = response.json()
+                if data.get("status") == "success" and data.get("data", {}).get("result"):
+                    metrics_data["memory_used_mb"] = data["data"]["result"][0]["values"]
+        except Exception as e:
+            print(f"Error fetching memory_used_mb: {e}")
+        
+        # Total Response Time (average)
+        try:
+            response = await httpx.get(
+                f"{PROMETHEUS_URL}/api/v1/query_range",
+                params={
+                    "query": f'rate(total_response_ms_sum{{service="{service_name}"}}[{window}]) / rate(total_response_ms_count{{service="{service_name}"}}[{window}]) * 1000',
+                    "start": time.time() - window_seconds,
+                    "end": time.time(),
+                    "step": "60"
+                },
+                timeout=10
+            )
+            if response.status_code == 200:
+                data = response.json()
+                if data.get("status") == "success" and data.get("data", {}).get("result"):
+                    metrics_data["total_response_ms"] = data["data"]["result"][0]["values"]
+        except Exception as e:
+            print(f"Error fetching total_response_ms: {e}")
+        
+        # Convert Prometheus format to frontend format
+        formatted_metrics = {}
+        for metric_name, values in metrics_data.items():
+            formatted_metrics[metric_name] = [
+                {"timestamp": float(timestamp), "value": float(value)}
+                for timestamp, value in values
+            ]
+        
+        return {
+            "service_name": service_name,
+            "window": window,
+            "metrics": formatted_metrics,
+            "current_status": service_data.get("status", "unknown"),
+            "last_scraped": service_data.get("last_scraped"),
+            "current_metrics": service_data.get("metrics", {})
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"Error in service_metrics: {e}")
+        raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
 
-@app.get("/api/databases")
-async def api_list_databases():
-    load_registered_databases()
-    # Compose status list
-    dbs = []
-    for name, uri in registered_databases.items():
-        status = database_statuses.get(name) or check_database_health(name, uri)
-        dbs.append(status)
-    # Counts
-    total = len(dbs)
-    connected = sum(1 for db in dbs if db["status"] == "connected")
-    disconnected = total - connected
+@app.get("/api/test_endpoint")
+async def test_endpoint():
+    """Simple test endpoint to verify backend is working"""
+    return {"message": "Backend is working", "timestamp": datetime.utcnow().isoformat()}
+
+@app.get("/api/service_metrics/{service_name}/summary")
+async def api_service_metrics_summary(service_name: str):
+    """Return service-specific metrics summary from logs for the Metrics tab."""
+    # Filter logs for this service
+    logs = [log for log in parsed_logs if log.get("service") == service_name]
+    total_requests = len(logs)
+    errors = [log for log in logs if log.get("level") == "ERROR" or "error" in log.get("message", "").lower()]
+    error_count = len(errors)
+    latencies = [
+        (log.get("latency_ms") if log.get("latency_ms") is not None else log.get("duration_ms"))
+        for log in logs
+        if (log.get("latency_ms") is not None or log.get("duration_ms") is not None)
+    ]
+    latencies = [l for l in latencies if l is not None]
+    avg_latency = sum(latencies) / len(latencies) if latencies else None
+    error_rate = (error_count / total_requests * 100) if total_requests > 0 else 0.0
+    # Status: healthy if no errors in last 10 logs, else warning/down
+    recent_logs = logs[-10:]
+    recent_errors = [log for log in recent_logs if log.get("level") == "ERROR" or "error" in log.get("message", "").lower()]
+    status = "healthy" if not recent_errors else ("warning" if error_count < total_requests else "down")
     return {
-        "databases": dbs,
-        "total": total,
-        "connected": connected,
-        "disconnected": disconnected
+        "service": service_name,
+        "total_requests": total_requests,
+        "errors": error_count,
+        "avg_latency_ms": round(avg_latency, 2) if avg_latency is not None else None,
+        "error_rate": round(error_rate, 2),
+        "status": status
     }
 
-@app.post("/api/databases")
-async def api_add_database(request: Request):
-    data = await request.json()
-    name = data.get("name")
-    uri = data.get("uri")
-    if not name or not uri:
-        return {"success": False, "message": "Name and URI required"}
-    load_registered_databases()
-    registered_databases[name] = uri
-    save_registered_databases()
-    database_statuses[name] = check_database_health(name, uri)
-    return {"success": True, "message": f"Database '{name}' registered."}
+@app.get("/api/service_metrics/{service_name}/requests_timeseries")
+async def service_requests_timeseries(
+    service_name: str,
+    window: str = Query("6h"),
+    interval: str = Query("5m")
+):
+    now = datetime.utcnow()
+    # Parse window and interval
+    if window.endswith("h"):
+        window_td = timedelta(hours=int(window[:-1]))
+    elif window.endswith("d"):
+        window_td = timedelta(days=int(window[:-1]))
+    elif window.endswith("m"):
+        window_td = timedelta(minutes=int(window[:-1]))
+    else:
+        window_td = timedelta(hours=6)
+    if interval.endswith("h"):
+        interval_td = timedelta(hours=int(interval[:-1]))
+    elif interval.endswith("d"):
+        interval_td = timedelta(days=int(interval[:-1]))
+    elif interval.endswith("m"):
+        interval_td = timedelta(minutes=int(interval[:-1]))
+    else:
+        interval_td = timedelta(minutes=5)
+    start_time = now - window_td
+    interval_seconds = int(interval_td.total_seconds())
+    # Filter logs for this service
+    logs = [log for log in parsed_logs if log.get("service") == service_name]
+    # Bucket by interval
+    buckets = defaultdict(lambda: {"total": 0})
+    for log in logs:
+        ts = log.get("timestamp")
+        if not ts:
+            continue
+        try:
+            log_time = dateutil_parser.parse(ts).replace(tzinfo=None)
+        except Exception:
+            continue
+        if log_time < start_time or log_time > now:
+            continue
+        bucket_start_ts = int((log_time.timestamp() // interval_seconds) * interval_seconds)
+        bucket_key = datetime.utcfromtimestamp(bucket_start_ts).strftime("%Y-%m-%dT%H:%M:00Z")
+        buckets[bucket_key]["total"] += 1
+    result = []
+    for bucket in sorted(buckets.keys()):
+        result.append({
+            "time": bucket,
+            "total": buckets[bucket]["total"]
+        })
+    return result
 
-@app.delete("/api/databases")
-async def api_remove_database(name: str):
-    load_registered_databases()
-    if name in registered_databases:
-        del registered_databases[name]
-        save_registered_databases()
-        database_statuses.pop(name, None)
-        return {"success": True, "message": f"Database '{name}' removed."}
-    return {"success": False, "message": f"Database '{name}' not found."}
+@app.get("/api/service_metrics/{service_name}/response_time_timeseries")
+async def service_response_time_timeseries(
+    service_name: str,
+    window: str = Query("6h"),
+    interval: str = Query("5m")
+):
+    now = datetime.utcnow()
+    if window.endswith("h"):
+        window_td = timedelta(hours=int(window[:-1]))
+    elif window.endswith("d"):
+        window_td = timedelta(days=int(window[:-1]))
+    elif window.endswith("m"):
+        window_td = timedelta(minutes=int(window[:-1]))
+    else:
+        window_td = timedelta(hours=6)
+    if interval.endswith("h"):
+        interval_td = timedelta(hours=int(interval[:-1]))
+    elif interval.endswith("d"):
+        interval_td = timedelta(days=int(interval[:-1]))
+    elif interval.endswith("m"):
+        interval_td = timedelta(minutes=int(interval[:-1]))
+    else:
+        interval_td = timedelta(minutes=5)
+    start_time = now - window_td
+    interval_seconds = int(interval_td.total_seconds())
+    # Filter logs for this service
+    logs = [log for log in parsed_logs if log.get("service") == service_name]
+    # Bucket by interval
+    buckets = defaultdict(lambda: {"count": 0, "sum": 0.0})
+    for log in logs:
+        ts = log.get("timestamp")
+        latency = log.get("latency_ms") or log.get("duration_ms")
+        if not ts or latency is None:
+            continue
+        try:
+            log_time = dateutil_parser.parse(ts).replace(tzinfo=None)
+        except Exception:
+            continue
+        if log_time < start_time or log_time > now:
+            continue
+        bucket_start_ts = int((log_time.timestamp() // interval_seconds) * interval_seconds)
+        bucket_key = datetime.utcfromtimestamp(bucket_start_ts).strftime("%Y-%m-%dT%H:%M:00Z")
+        buckets[bucket_key]["count"] += 1
+        buckets[bucket_key]["sum"] += latency
+    result = []
+    for bucket in sorted(buckets.keys()):
+        count = buckets[bucket]["count"]
+        avg = buckets[bucket]["sum"] / count if count > 0 else 0
+        result.append({
+            "time": bucket,
+            "avg_response_time_ms": round(avg, 2),
+            "count": count
+        })
+    return result
+
+@app.get("/api/service_metrics/{service_name}/errors_timeseries")
+async def service_errors_timeseries(
+    service_name: str,
+    window: str = Query("6h"),
+    interval: str = Query("5m")
+):
+    now = datetime.utcnow()
+    # Parse window and interval
+    if window.endswith("h"):
+        window_td = timedelta(hours=int(window[:-1]))
+    elif window.endswith("d"):
+        window_td = timedelta(days=int(window[:-1]))
+    elif window.endswith("m"):
+        window_td = timedelta(minutes=int(window[:-1]))
+    else:
+        window_td = timedelta(hours=6)
+    if interval.endswith("h"):
+        interval_td = timedelta(hours=int(interval[:-1]))
+    elif interval.endswith("d"):
+        interval_td = timedelta(days=int(interval[:-1]))
+    elif interval.endswith("m"):
+        interval_td = timedelta(minutes=int(interval[:-1]))
+    else:
+        interval_td = timedelta(minutes=5)
+    start_time = now - window_td
+    interval_seconds = int(interval_td.total_seconds())
+    # Filter logs for this service
+    logs = [log for log in parsed_logs if log.get("service") == service_name]
+    # Bucket by interval
+    buckets = defaultdict(lambda: {"errors": 0})
+    for log in logs:
+        ts = log.get("timestamp")
+        if not ts:
+            continue
+        try:
+            log_time = dateutil_parser.parse(ts).replace(tzinfo=None)
+        except Exception:
+            continue
+        if log_time < start_time or log_time > now:
+            continue
+        if log.get("level") == "ERROR" or "error" in log.get("message", "").lower():
+            bucket_start_ts = int((log_time.timestamp() // interval_seconds) * interval_seconds)
+            bucket_key = datetime.utcfromtimestamp(bucket_start_ts).strftime("%Y-%m-%dT%H:%M:00Z")
+            buckets[bucket_key]["errors"] += 1
+    result = []
+    for bucket in sorted(buckets.keys()):
+        result.append({
+            "time": bucket,
+            "errors": buckets[bucket]["errors"]
+        })
+    return result

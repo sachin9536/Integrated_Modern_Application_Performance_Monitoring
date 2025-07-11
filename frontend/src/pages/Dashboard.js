@@ -1,4 +1,5 @@
 import React, { useState, useEffect } from "react";
+import { Link } from "react-router-dom";
 import {
   ServerIcon,
   DocumentTextIcon,
@@ -92,161 +93,146 @@ const Dashboard = () => {
         </div>
       );
     }
-    // Determine health color
-    const isHealthy =
-      systemOverview.active_services === systemOverview.total_applications &&
-      systemOverview.system?.every(
-        (sys) => sys.status === "up" || sys.status === "connected"
-      );
-    const sysColor = isHealthy
-      ? "bg-success-50 border-success-200"
-      : "bg-danger-50 border-danger-200";
-    const dbColor =
-      systemOverview.system?.find((sys) => sys.name === "MongoDB")?.status ===
-      "connected"
-        ? "bg-success-50 border-success-200"
-        : "bg-danger-50 border-danger-200";
-    const sysStatus = isHealthy ? "Healthy" : "Issues";
-    const dbStatus =
-      systemOverview.system?.find((sys) => sys.name === "MongoDB")?.status ===
-      "connected"
-        ? "Connected"
-        : "Disconnected";
+    // Calculate up/down apps
+    const upApps =
+      systemOverview.services?.filter((svc) => svc.status === "healthy")
+        .length || 0;
+    const downApps =
+      systemOverview.services?.filter((svc) => svc.status !== "healthy")
+        .length || 0;
     return (
       <div className="flex flex-col md:flex-row gap-4 w-full">
-        {/* System Overview */}
-        <div
-          className={`flex-1 rounded-2xl p-6 shadow-md border ${sysColor} flex flex-col justify-between min-w-[250px] animate-fadeIn`}
+        {/* System Overview: User's Registered Apps */}
+        <Link
+          to="/services"
+          className={`flex-1 rounded-2xl p-6 shadow-md border bg-blue-50 border-blue-200 flex flex-col justify-between min-w-[250px] animate-fadeIn transition-transform hover:scale-105 cursor-pointer`}
+          style={{ textDecoration: "none" }}
+          title="View all services"
         >
           <div className="flex items-center justify-between mb-2">
             <span className="font-bold text-xl flex items-center">
-              <ServerIcon className="w-6 h-6 mr-2 text-primary-600" /> System
-              Overview
+              <ServerIcon className="w-6 h-6 mr-2 text-primary-600" />
+              System Overview
             </span>
-            <span
-              className={`inline-flex items-center px-2 py-1 rounded-full text-xs font-bold uppercase ml-2 ${
-                isHealthy
-                  ? "bg-success-100 text-success-700"
-                  : "bg-danger-100 text-danger-700"
-              }`}
-            >
-              {isHealthy ? (
-                <ServerIcon className="w-4 h-4 mr-1 text-success-500" />
-              ) : (
-                <ExclamationTriangleIcon className="w-4 h-4 mr-1 text-danger-500" />
-              )}{" "}
-              {sysStatus}
+            <span className="inline-flex items-center px-2 py-1 rounded-full text-xs font-bold uppercase ml-2 bg-blue-100 text-blue-700">
+              User Apps
             </span>
           </div>
-          <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mt-4 mb-2">
+          <div className="grid grid-cols-3 gap-4 mt-6 mb-4">
             <div className="flex flex-col items-center">
               <span className="text-2xl font-bold text-gray-900">
                 {systemOverview.total_applications}
               </span>
               <span className="uppercase text-xs text-gray-500 mt-1">
-                Total Apps
+                Total
               </span>
             </div>
             <div className="flex flex-col items-center">
               <span className="text-2xl font-bold text-success-600">
-                {systemOverview.active_services}
+                {upApps}
               </span>
-              <span className="uppercase text-xs text-gray-500 mt-1">
-                Active
-              </span>
+              <span className="uppercase text-xs text-gray-500 mt-1">Up</span>
             </div>
             <div className="flex flex-col items-center">
               <span className="text-2xl font-bold text-danger-600">
-                {systemOverview.inactive_services}
+                {downApps}
               </span>
-              <span className="uppercase text-xs text-gray-500 mt-1">
-                Inactive
-              </span>
+              <span className="uppercase text-xs text-gray-500 mt-1">Down</span>
             </div>
-            <div className="flex flex-col items-center">
-              {/* Placeholder for avg response time */}
-              <span className="text-2xl font-bold text-gray-900">318ms</span>
-              <span className="uppercase text-xs text-gray-500 mt-1">
-                Avg Response
+          </div>
+          <div className="flex-1 overflow-y-auto max-h-32 w-full mt-2">
+            {systemOverview.services && systemOverview.services.length > 0 ? (
+              <ul className="text-xs text-gray-700 space-y-1">
+                {systemOverview.services.map((svc) => (
+                  <li key={svc.name} className="flex items-center gap-2">
+                    <span className="font-semibold">{svc.name}</span>
+                    <span
+                      className={`px-2 py-0.5 rounded-full text-xs font-medium ${
+                        svc.status === "healthy"
+                          ? "bg-green-100 text-green-700"
+                          : svc.status === "unhealthy"
+                          ? "bg-red-100 text-red-700"
+                          : "bg-gray-100 text-gray-700"
+                      }`}
+                    >
+                      {svc.status}
+                    </span>
+                  </li>
+                ))}
+              </ul>
+            ) : (
+              <span className="text-xs text-gray-400">
+                No apps registered yet.
               </span>
-            </div>
+            )}
           </div>
           <div className="flex items-center justify-end mt-2 text-xs text-gray-400">
             Last updated: {lastUpdated.toLocaleTimeString()}
           </div>
-        </div>
-        {/* Database Connections */}
+        </Link>
+        {/* Database Connections Card */}
         <div
-          className={`flex-1 rounded-2xl p-6 shadow-md border ${dbColor} flex flex-col justify-between min-w-[250px] animate-fadeIn`}
+          className={`flex-1 rounded-2xl p-6 shadow-md border bg-green-50 border-green-200 flex flex-col justify-between min-w-[250px] animate-fadeIn`}
         >
           <div className="flex items-center justify-between mb-2">
             <span className="font-bold text-xl flex items-center">
-              <ChartBarIcon className="w-6 h-6 mr-2 text-primary-600" />{" "}
-              System Status
+              <ChartBarIcon className="w-6 h-6 mr-2 text-green-600" />
+              Database Connections
             </span>
-            <span
-              className={`inline-flex items-center px-2 py-1 rounded-full text-xs font-bold uppercase ml-2 ${
-                systemOverview.system?.find(sys => sys.name === "MongoDB")?.status === "connected"
-                  ? "bg-success-100 text-success-700"
-                  : "bg-danger-100 text-danger-700"
-              }`}
-            >
-              {systemOverview.system?.find(sys => sys.name === "MongoDB")?.status === "connected" ? (
-                <ServerIcon className="w-4 h-4 mr-1 text-success-500" />
-              ) : (
-                <ExclamationTriangleIcon className="w-4 h-4 mr-1 text-danger-500" />
-              )}{" "}
-              {dbStatus}
+            <span className="inline-flex items-center px-2 py-1 rounded-full text-xs font-bold uppercase ml-2 bg-green-100 text-green-700">
+              Databases
             </span>
           </div>
-          <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mt-4 mb-2">
+          <div className="grid grid-cols-3 gap-4 mt-6 mb-4">
             <div className="flex flex-col items-center">
               <span className="text-2xl font-bold text-gray-900">
-                {systemOverview.system?.length || 0}
+                {systemOverview.databases?.total || 0}
               </span>
               <span className="uppercase text-xs text-gray-500 mt-1">
-                Total Systems
+                Total
               </span>
             </div>
             <div className="flex flex-col items-center">
               <span className="text-2xl font-bold text-success-600">
-                {
-                  systemOverview.system?.filter(
-                    (sys) => sys.status === "up" || sys.status === "connected"
-                  ).length || 0
-                }
+                {systemOverview.databases?.connected || 0}
               </span>
               <span className="uppercase text-xs text-gray-500 mt-1">
-                Healthy
+                Connected
               </span>
             </div>
             <div className="flex flex-col items-center">
               <span className="text-2xl font-bold text-danger-600">
-                {
-                  systemOverview.system?.filter(
-                    (sys) => sys.status !== "up" && sys.status !== "connected"
-                  ).length || 0
-                }
+                {systemOverview.databases?.disconnected || 0}
               </span>
               <span className="uppercase text-xs text-gray-500 mt-1">
-                Issues
+                Disconnected
               </span>
             </div>
-            <div className="flex flex-col items-center">
-              <span
-                className={`text-xs font-bold px-3 py-1 rounded-full ${
-                  systemOverview.system?.find(sys => sys.name === "MongoDB")?.status === "connected"
-                    ? "bg-success-100 text-success-700"
-                    : "bg-danger-100 text-danger-700"
-                }`}
-              >
-                {systemOverview.system?.find(sys => sys.name === "MongoDB")?.status?.toUpperCase() ||
-                  "UNKNOWN"}
+          </div>
+          <div className="flex-1 overflow-y-auto max-h-32 w-full mt-2">
+            {systemOverview.databases?.details &&
+            systemOverview.databases.details.length > 0 ? (
+              <ul className="text-xs text-gray-700 space-y-1">
+                {systemOverview.databases.details.map((db) => (
+                  <li key={db.name} className="flex items-center gap-2">
+                    <span className="font-semibold">{db.name}</span>
+                    <span
+                      className={`px-2 py-0.5 rounded-full text-xs font-medium ${
+                        db.status === "connected"
+                          ? "bg-green-100 text-green-700"
+                          : "bg-red-100 text-red-700"
+                      }`}
+                    >
+                      {db.status}
+                    </span>
+                  </li>
+                ))}
+              </ul>
+            ) : (
+              <span className="text-xs text-gray-400">
+                No databases registered.
               </span>
-              <span className="uppercase text-xs text-gray-500 mt-1">
-                MongoDB
-              </span>
-            </div>
+            )}
           </div>
           <div className="flex items-center justify-end mt-2 text-xs text-gray-400">
             Last updated: {lastUpdated.toLocaleTimeString()}
@@ -401,9 +387,8 @@ const Dashboard = () => {
         <MetricCard
           title="Active Services"
           value={
-            data.health?.components
-              ? Object.keys(data.health.components).length
-              : 0
+            systemOverview?.services?.filter((svc) => svc.status === "healthy")
+              .length || 0
           }
           subtitle="Running services"
           icon={ServerIcon}

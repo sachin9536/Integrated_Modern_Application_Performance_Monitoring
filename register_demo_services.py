@@ -16,8 +16,8 @@ DEMO_SERVICES = [
     ("service_delta", "http://service_delta:9400"),
 ]
 
-API_URL = os.getenv("API_URL", "http://monitoring_engine:8000")
-REGISTER_ENDPOINT = f"{API_URL}/api/registered_services"
+API_URL = os.getenv("API_URL", "http://monitoring_engine_demo:8000")
+REGISTER_ENDPOINT = f"{API_URL}/api/demo/register_services"
 
 # Wait for backend to be up (up to 2 minutes)
 max_retries = 60

@@ -395,7 +395,12 @@ const Services = () => {
                           N/A
                         </span>
                       ) : (
-                        getMetric(service.metrics?.ttfb_ms, " ms")
+                        getMetric(
+                          service.metrics?.avg_latency
+                            ? service.metrics.avg_latency * 1000
+                            : service.metrics?.ttfb_ms,
+                          " ms"
+                        )
                       )
                     }
                     subtitle="Avg Response"
@@ -403,9 +408,13 @@ const Services = () => {
                     color={
                       isDown
                         ? "gray"
-                        : service.metrics?.ttfb_ms > 500
+                        : (service.metrics?.avg_latency
+                            ? service.metrics.avg_latency * 1000
+                            : service.metrics?.ttfb_ms) > 500
                         ? "danger"
-                        : service.metrics?.ttfb_ms > 200
+                        : (service.metrics?.avg_latency
+                            ? service.metrics.avg_latency * 1000
+                            : service.metrics?.ttfb_ms) > 200
                         ? "warning"
                         : "success"
                     }
@@ -583,4 +592,3 @@ const Services = () => {
 };
 
 export default Services;
-

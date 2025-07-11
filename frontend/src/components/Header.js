@@ -9,6 +9,8 @@ import {
 } from "@heroicons/react/24/outline";
 import { apiService, dataUtils } from "../services/api";
 import toast from "react-hot-toast";
+import { useAuth } from "../AuthContext";
+import { useNavigate } from "react-router-dom";
 
 const Header = ({ onMenuClick }) => {
   const [systemStatus, setSystemStatus] = useState(null);
@@ -18,6 +20,9 @@ const Header = ({ onMenuClick }) => {
   const [anomalies, setAnomalies] = useState([]);
   const [popoverOpen, setPopoverOpen] = useState(false);
   const bellRef = useRef();
+
+  const { logout } = useAuth();
+  const navigate = useNavigate();
 
   // Fetch system status
   const fetchSystemStatus = async () => {
@@ -112,6 +117,11 @@ const Header = ({ onMenuClick }) => {
     anomalies.length > 0
       ? "text-warning-500 hover:text-warning-600 dark:text-warning-400 dark:hover:text-warning-300"
       : "text-gray-400 hover:text-gray-600 dark:text-gray-300 dark:hover:text-white";
+
+  const handleLogout = () => {
+    logout();
+    navigate("/welcome");
+  };
 
   return (
     <header className="bg-white dark:bg-gray-800 shadow-sm border-b border-gray-200 dark:border-gray-700">
@@ -271,6 +281,15 @@ const Header = ({ onMenuClick }) => {
               </div>
             )}
           </div>
+
+          {/* Logout Button */}
+          <button
+            type="button"
+            className="btn btn-secondary px-3 py-2 text-sm font-medium rounded-lg shadow-sm border border-gray-300 dark:border-gray-600 hover:bg-gray-100 dark:hover:bg-gray-700 transition-colors"
+            onClick={handleLogout}
+          >
+            Logout
+          </button>
 
           {/* Last Updated */}
           <div className="hidden sm:flex items-center text-xs text-gray-500 dark:text-gray-300">

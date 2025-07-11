@@ -2,6 +2,60 @@ version: "3.9"
 
 services:
   # ======================
+  # MongoDB Database
+  # ======================
+  mongodb:
+    image: mongo:5
+    container_name: mongodb
+    ports:
+      - "27017:27017"
+    environment:
+      - MONGO_INITDB_ROOT_USERNAME=admin
+      - MONGO_INITDB_ROOT_PASSWORD=secret
+    volumes:
+      - mongodb_data:/data/db
+    networks:
+      - private_net
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "mongosh",
+          "--username",
+          "admin",
+          "--password",
+          "secret",
+          "--authenticationDatabase",
+          "admin",
+          "--eval",
+          "db.adminCommand('ping')",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+  # ======================
+  # Mongo Express UI
+  # ======================
+  mongo-express:
+    image: mongo-express
+    container_name: mongo-express
+    ports:
+      - "8081:8081"
+    environment:
+      - ME_CONFIG_MONGODB_SERVER=mongodb
+      - ME_CONFIG_MONGODB_ADMINUSERNAME=admin
+      - ME_CONFIG_MONGODB_ADMINPASSWORD=secret
+      - ME_CONFIG_MONGODB_ENABLE_ADMIN=true
+      - ME_CONFIG_BASICAUTH=false
+    depends_on:
+      mongodb:
+        condition: service_healthy
+    networks:
+      - private_net
+
+  # ======================
   # Prometheus Monitoring
   # ======================
   prometheus:
@@ -15,7 +69,7 @@ services:
       - private_net
 
   # ======================
-  # Monitoring Engine (Backend API)
+  # Monitoring Engine (Backend API) - Production Mode
   # ======================
   monitoring_engine:
     build:
@@ -25,16 +79,22 @@ services:
     ports:
       - "8000:8000"
     depends_on:
-      - prometheus
+      mongodb:
+        condition: service_healthy
+      prometheus:
+        condition: service_started
     networks:
       - private_net
     environment:
+      - MONGO_URI=mongodb://admin:secret@mongodb:27017
+      - JWT_SECRET=mysecretkey
       - GROQ_API_KEY=your_groq_api_key
       - GROQ_MODEL=llama3-8b-8192
       - PROMETHEUS_URL=http://prometheus:9090
       - SENDGRID_API_KEY=your_sendgrid_api_key
       - ALERT_EMAIL_FROM=your_email@example.com
       - ALERT_EMAIL_TO=your_email@example.com
+      - DEMO_MODE=0
     volumes:
       - ./logs:/app/logs
       - ./data:/app/data
@@ -43,9 +103,10 @@ services:
       interval: 10s
       timeout: 5s
       retries: 30
+      start_period: 30s
 
   # ======================
-  # (Optional) Frontend React App
+  # Frontend React App - Production Mode
   # ======================
   frontend:
     build:
@@ -57,64 +118,111 @@ services:
     networks:
       - private_net
     depends_on:
-      - monitoring_engine
+      monitoring_engine:
+        condition: service_healthy
     environment:
       - REACT_APP_API_URL=http://localhost:8000
 
   # ======================
-  # Demo Services (profile: demo)
+  # Frontend React App - Demo Mode
   # ======================
-  service_alpha:
-    build:
-      context: .
-      dockerfile: ./services/service_alpha.Dockerfile
-    container_name: service_alpha
-    ports:
-      - "9101:8000"
-    networks:
-      - private_net
-    profiles: ["demo"]
+  # frontend_demo:
+  #   build:
+  #     context: ./frontend
+  #     dockerfile: Dockerfile
+  #   container_name: frontend_demo
+  #   ports:
+  #     - "3001:3000"
+  #   networks:
+  #     - private_net
+  #   depends_on:
+  #     monitoring_engine_demo:
+  #       condition: service_healthy
+  #   environment:
+  #     - REACT_APP_API_URL=http://localhost:8001
+  #   profiles: ["demo"]
 
-  service_beta:
-    build:
-      context: .
-      dockerfile: ./services/service_beta.Dockerfile
-    container_name: service_beta
-    ports:
-      - "9102:8000"
-    networks:
-      - private_net
-    profiles: ["demo"]
-
-  service_gamma:
-    build:
-      context: .
-      dockerfile: ./services/service_gamma.Dockerfile
-    container_name: service_gamma
-    ports:
-      - "9103:8000"
-    networks:
-      - private_net
-    profiles: ["demo"]
-
-  dummy_service:
-    build:
-      context: .
-      dockerfile: ./services/dummy_service.Dockerfile
-    container_name: dummy_service
-    ports:
-      - "9104:9000"
-    networks:
-      - private_net
-    profiles: ["demo"]
-
-  # service_delta:
+  # ======================
+  # Demo Mode Monitoring Engine (with DEMO_MODE=1)
+  # ======================
+  # monitoring_engine_demo:
   #   build:
   #     context: .
-  #     dockerfile: ./services/service_delta.Dockerfile
-  #   container_name: service_delta
+  #     dockerfile: Dockerfile.monitoring
+  #   container_name: monitoring_engine_demo
   #   ports:
-  #     - "9105:9400"
+  #     - "8001:8000"
+  #   depends_on:
+  #     mongodb:
+  #       condition: service_healthy
+  #     prometheus:
+  #       condition: service_started
+  #   networks:
+  #     - private_net
+  #   environment:
+  #     - MONGO_URI=mongodb://admin:secret@mongodb:27017
+  #     - JWT_SECRET=your_jwt_secret_key_here
+  #     - GROQ_API_KEY=your_groq_api_key
+  #     - GROQ_MODEL=llama3-8b-8192
+  #     - PROMETHEUS_URL=http://prometheus:9090
+  #     - SENDGRID_API_KEY=your_sendgrid_api_key
+  #     - ALERT_EMAIL_FROM=your_email@example.com
+  #     - ALERT_EMAIL_TO=your_email@example.com
+  #     - DEMO_MODE=1
+  #   volumes:
+  #     - ./logs:/app/logs
+  #     - ./data:/app/data
+  #   healthcheck:
+  #     test: ["CMD", "curl", "-f", "http://localhost:8000/api/health"]
+  #     interval: 10s
+  #     timeout: 5s
+  #     retries: 30
+  #     start_period: 30s
+  #   profiles: ["demo"]
+
+  # ======================
+  # Demo Services (profile: demo)
+  # ======================
+  # service_alpha:
+  #   build:
+  #     context: .
+  #     dockerfile: ./services/service_alpha.Dockerfile
+  #   container_name: service_alpha
+  #   ports:
+  #     - "9101:8000"
+  #   networks:
+  #     - private_net
+  #   profiles: ["demo"]
+
+  # service_beta:
+  #   build:
+  #     context: .
+  #     dockerfile: ./services/service_beta.Dockerfile
+  #   container_name: service_beta
+  #   ports:
+  #     - "9102:8000"
+  #   networks:
+  #     - private_net
+  #   profiles: ["demo"]
+
+  # service_gamma:
+  #   build:
+  #     context: .
+  #     dockerfile: ./services/service_gamma.Dockerfile
+  #   container_name: service_gamma
+  #   ports:
+  #     - "9103:8000"
+  #   networks:
+  #     - private_net
+  #   profiles: ["demo"]
+
+  # dummy_service:
+  #   build:
+  #     context: .
+  #     dockerfile: ./services/dummy_service.Dockerfile
+  #   container_name: dummy_service
+  #   ports:
+  #     - "9104:9000"
   #   networks:
   #     - private_net
   #   profiles: ["demo"]
@@ -123,43 +231,44 @@ services:
     build:
       context: .
       dockerfile: Dockerfile.controller
-    container_name: controller
+    environment:
+      - MONITORING_ENGINE_URL=http://monitoring_engine:8000
+      - CONTROLLER_USER_EMAIL=testuser@example.com
+      - CONTROLLER_USER_PASSWORD=testpass123
+      # Add other env vars as needed
     depends_on:
-      - service_alpha
-      - service_beta
-      - service_gamma
-      - dummy_service
-      # - service_delta
+      - monitoring_engine
     volumes:
       - ./logs:/app/logs
+    restart: unless-stopped
     networks:
       - private_net
-    profiles: ["demo"]
 
   # Auto-register demo services (runs once in demo mode)
-  register_demo_services:
-    image: python:3.11-slim
-    depends_on:
-      monitoring_engine:
-        condition: service_healthy
-      service_alpha:
-        condition: service_started
-      service_beta:
-        condition: service_started
-      service_gamma:
-        condition: service_started
-      dummy_service:
-        condition: service_started
-      # service_delta:
-      #   condition: service_started
-    volumes:
-      - ./register_demo_services.py:/register_demo_services.py:ro
-    environment:
-      - DEMO_MODE=1
-      - API_URL=http://monitoring_engine:8000
-    command: sh -c "pip install requests && python /register_demo_services.py"
-    profiles: ["demo"]
-    restart: "no"
+  # register_demo_services:
+  #   image: python:3.11-slim
+  #   depends_on:
+  #     monitoring_engine_demo:
+  #       condition: service_healthy
+  #     service_alpha:
+  #       condition: service_started
+  #     service_beta:
+  #       condition: service_started
+  #     service_gamma:
+  #       condition: service_started
+  #     dummy_service:
+  #       condition: service_started
+  #   volumes:
+  #     - ./register_demo_services.py:/register_demo_services.py:ro
+  #   environment:
+  #     - DEMO_MODE=1
+  #     - API_URL=http://monitoring_engine_demo:8000
+  #   command: sh -c "pip install requests && python /register_demo_services.py"
+  #   profiles: ["demo"]
+  #   restart: "no"
+
+volumes:
+  mongodb_data:
 
 networks:
   private_net:

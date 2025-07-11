@@ -13,7 +13,7 @@ Welcome to **AppVital** – your all-in-one Application Performance Monitoring (
   ```sh
   docker compose up
   ```
-- **What happens:** Only the monitoring platform (backend, Prometheus, frontend) runs. You register your own services via the dashboard.
+- **What happens:** Only the monitoring platform (backend, Prometheus, frontend) runs. You register your own services via the dashboard. All registered services are stored per-user in MongoDB (not in a JSON file).
 - **What you see:**
   - If no services are registered, the dashboard will show "No data yet" states.
   - As soon as you register a service (with a `/metrics` endpoint), AppVital will start monitoring it.
@@ -26,18 +26,18 @@ Welcome to **AppVital** – your all-in-one Application Performance Monitoring (
   docker compose --profile demo up
   ```
 - **What happens:**
-  - The platform runs **plus** sample services (`service_alpha`, `service_beta`, `service_gamma`, `dummy_service`, `service_delta`) and a traffic generator.
+  - The platform runs **plus** sample services (`service_alpha`, `service_beta`, `service_gamma`, `dummy_service`) and a traffic generator.
   - These demo services expose `/metrics` endpoints and generate realistic traffic and logs.
+  - Demo services are automatically registered and traffic is generated automatically.
 - **How to use:**
   1. Go to the dashboard at [http://localhost:3000](http://localhost:3000).
-  2. Register the demo services using their URLs (see below) in the "Register New Application" form.
-     - Example URLs:
-       - `http://service_alpha:8000`
-       - `http://service_beta:8000`
-       - `http://service_gamma:8000`
-       - `http://dummy_service:9000`
-       - `http://service_delta:9400`
+  2. Demo services are automatically registered and will appear in your Services page.
   3. The traffic generator will automatically generate logs and metrics for these services.
+  4. You can also manually register additional services using their URLs:
+     - `http://service_alpha:8000`
+     - `http://service_beta:8000`
+     - `http://service_gamma:8000`
+     - `http://dummy_service:9000`
 
 ---
 
@@ -50,7 +50,7 @@ Welcome to **AppVital** – your all-in-one Application Performance Monitoring (
    - [Java](https://github.com/prometheus/client_java)
    - [.NET](https://github.com/prometheus-net/prometheus-net)
 2. **Expose a `/metrics` endpoint** in your service.
-3. **Register your service** in the AppVital dashboard (name + URL).
+3. **Register your service** in the AppVital dashboard (name + URL). Services are stored per-user in MongoDB.
 4. **AppVital will automatically start monitoring and visualizing your metrics!**
 
 ---

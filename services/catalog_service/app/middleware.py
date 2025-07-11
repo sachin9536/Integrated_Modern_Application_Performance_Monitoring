@@ -24,7 +24,7 @@ RESPONSE_TIME_HISTOGRAM = Histogram(
     "response_time_ms",
     "Response time per endpoint in milliseconds",
     ["method", "endpoint"],
-    buckets=[50, 100, 200, 300, 400, 500, 1000, float("inf")]
+    buckets=[50, 100, 200, 300, 400, 500, 1000, 10000]
 )
 
 class LoggingMiddleware(BaseHTTPMiddleware):

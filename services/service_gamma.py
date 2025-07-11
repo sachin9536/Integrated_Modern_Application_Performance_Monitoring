@@ -4,6 +4,7 @@ from prometheus_client import make_asgi_app, Counter, Histogram, Gauge, Collecto
 import time
 import random
 import psutil
+import logging
 
 app = FastAPI()
 registry = CollectorRegistry()
@@ -66,6 +67,7 @@ def root():
     if random.random() < 0.15:
         ERRORS.labels(SERVICE).inc()
         status = 500
+        logging.error(f"Simulated error in {SERVICE}: returning 500")
 
     # Simulate memory bloat
     memory_bloat.append(bytearray(random.randint(50000, 100000)))

@@ -1,10 +1,11 @@
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from prometheus_client import make_asgi_app, Counter, Histogram, Gauge, CollectorRegistry
 import time
 import random
 import psutil
 import math
+import logging
 
 app = FastAPI()
 registry = CollectorRegistry()
@@ -26,7 +27,14 @@ app.mount("/metrics", make_asgi_app(registry=registry))
 
 
 @app.get("/")
-def root():
+async def root(request: Request):
+    # Log service identification headers
+    requesting_service = request.headers.get("X-Requesting-Service", "unknown")
+    target_service = request.headers.get("X-Target-Service", "unknown")
+    request_id = request.headers.get("X-Request-ID", "unknown")
+    
+    logging.info(f"Service Beta received request from {requesting_service} targeting {target_service} (ID: {request_id})")
+    
     # Simulate timing components
     ttfb = random.uniform(80, 180)
     server = random.uniform(150, 300)
@@ -51,12 +59,18 @@ def root():
     if random.random() < 0.2:
         ERRORS.labels(SERVICE).inc()
         status_code = 500
+        logging.error(f"Simulated error in {SERVICE}: returning 500")
 
     # Request count
     REQUESTS.labels(SERVICE, str(status_code)).inc()
 
     time.sleep(total / 1000)
-    return JSONResponse(content={"message": "Hello from service beta!"}, status_code=status_code)
+    return JSONResponse(content={
+        "message": "Hello from service beta!",
+        "requested_by": requesting_service,
+        "target_service": target_service,
+        "request_id": request_id
+    }, status_code=status_code)
 
 
 @app.get("/health")

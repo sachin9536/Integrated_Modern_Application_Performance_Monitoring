@@ -9,8 +9,9 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy the monitoring engine
+# Copy the monitoring engine and utils
 COPY monitoring_engine.py .
+COPY utils/ ./utils/
 
 # Create logs directory
 RUN mkdir -p /app/logs

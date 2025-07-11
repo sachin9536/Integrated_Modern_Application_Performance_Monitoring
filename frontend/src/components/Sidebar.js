@@ -17,7 +17,7 @@ import { clsx } from "clsx";
 const navigation = [
   {
     name: "Dashboard",
-    href: "/",
+    href: "/dashboard",
     icon: HomeIcon,
     description: "System overview",
   },

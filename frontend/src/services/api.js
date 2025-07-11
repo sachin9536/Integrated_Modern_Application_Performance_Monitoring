@@ -264,6 +264,11 @@ export const apiService = {
     return response.data;
   },
 
+  async getServiceMetricsSummary(name) {
+    const response = await api.get(`/api/service_metrics/${name}/summary`);
+    return response.data;
+  },
+
   // Database Management
   async getDatabases() {
     const response = await api.get("/api/databases");
@@ -277,6 +282,59 @@ export const apiService = {
 
   async removeDatabase(name) {
     const response = await api.delete(`/api/databases`, { params: { name } });
+    return response.data;
+  },
+
+  // User Authentication
+  async registerUser({ email, password }) {
+    const response = await api.post("/register", { email, password });
+    return response.data;
+  },
+
+  async loginUser({ email, password }) {
+    const response = await api.post("/login", { email, password });
+    return response.data;
+  },
+
+  // Log Ingestion
+  async ingestLogs(logs) {
+    const response = await api.post("/api/ingest_log", { logs });
+    return response.data;
+  },
+
+  async ingestSingleLog(logEntry) {
+    const response = await api.post("/api/ingest_single_log", logEntry);
+    return response.data;
+  },
+
+  // Per-service HTTP Requests Over Time
+  async getServiceRequestsTimeSeries(name, window = "6h", interval = "5m") {
+    const response = await api.get(
+      `/api/service_metrics/${name}/requests_timeseries`,
+      {
+        params: { window, interval },
+      }
+    );
+    return response.data;
+  },
+
+  // Per-service Response Time Over Time
+  async getServiceResponseTimeTimeSeries(name, window = "6h", interval = "5m") {
+    const response = await api.get(
+      `/api/service_metrics/${name}/response_time_timeseries`,
+      {
+        params: { window, interval },
+      }
+    );
+    return response.data;
+  },
+
+  // Per-service Errors Over Time
+  async getServiceErrorsTimeSeries(name, window = "6h", interval = "5m") {
+    const response = await api.get(
+      `/api/service_metrics/${name}/errors_timeseries`,
+      { params: { window, interval } }
+    );
     return response.data;
   },
 };
@@ -374,3 +432,4 @@ export const dataUtils = {
 };
 
 export default api;
+export { api };

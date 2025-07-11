@@ -1,9 +1,10 @@
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from prometheus_client import make_asgi_app, Counter, Histogram, Gauge, CollectorRegistry
 import time
 import random
 import psutil
+import logging
 
 app = FastAPI()
 registry = CollectorRegistry()
@@ -38,7 +39,14 @@ app.mount("/metrics", make_asgi_app(registry=registry))
 
 
 @app.get("/")
-def root():
+async def root(request: Request):
+    # Log service identification headers
+    requesting_service = request.headers.get("X-Requesting-Service", "unknown")
+    target_service = request.headers.get("X-Target-Service", "unknown")
+    request_id = request.headers.get("X-Request-ID", "unknown")
+    
+    logging.info(f"Service Alpha received request from {requesting_service} targeting {target_service} (ID: {request_id})")
+    
     # Simulate component durations
     ttfb = random.uniform(50, 150)
     server = random.uniform(50, 200)
@@ -60,12 +68,18 @@ def root():
     if random.random() < 0.1:
         ERRORS.labels(SERVICE).inc()
         status_code = 500
+        logging.error(f"Simulated error in {SERVICE}: returning 500")
 
     # Count requests with status
     REQUESTS.labels(SERVICE, str(status_code)).inc()
 
     time.sleep(total / 1000)  # Simulate real latency
-    return JSONResponse(content={"message": "Hello from service alpha!"}, status_code=status_code)
+    return JSONResponse(content={
+        "message": "Hello from service alpha!",
+        "requested_by": requesting_service,
+        "target_service": target_service,
+        "request_id": request_id
+    }, status_code=status_code)
 
 
 @app.get("/health")
