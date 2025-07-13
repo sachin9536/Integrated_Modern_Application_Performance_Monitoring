@@ -337,6 +337,32 @@ export const apiService = {
     );
     return response.data;
   },
+
+  // Per-service CPU History (NEW)
+  async getServiceCpuHistory(name, window = "24h") {
+    const response = await api.get(`/api/service_metrics/${name}/cpu_history`, {
+      params: { window },
+    });
+    return response.data;
+  },
+
+  // Per-service Memory History (NEW)
+  async getServiceMemoryHistory(name, window = "24h") {
+    const response = await api.get(
+      `/api/service_metrics/${name}/memory_history`,
+      { params: { window } }
+    );
+    return response.data;
+  },
+
+  // Per-service Load Forecast (NEW)
+  async getServiceLoadForecast(name, forecastHours = 24) {
+    const response = await api.get(
+      `/api/service_metrics/${name}/load_forecast`,
+      { params: { forecast_hours: forecastHours } }
+    );
+    return response.data;
+  },
 };
 
 // Utility functions for data processing

@@ -272,34 +272,32 @@ const Services = () => {
             return (
               <div
                 key={service.name}
-                className={`card shadow-lg hover:shadow-xl transition-shadow duration-200 rounded-2xl border ${cardColor} mb-6 relative group flex flex-col justify-between min-h-[370px] animate-fadeIn`}
+                className={`card shadow-lg hover:shadow-xl transition-all duration-300 rounded-2xl border ${cardColor} mb-6 relative group flex flex-col justify-between min-h-[400px] animate-fadeIn`}
                 tabIndex={0}
                 aria-label={`Service card for ${service.name}`}
               >
                 {/* Header */}
-                <div className="flex items-center justify-between mb-2">
+                <div className="flex items-center justify-between mb-4">
                   <div className="flex items-center space-x-3">
                     <span className="font-extrabold text-2xl text-gray-900 dark:text-gray-100 tracking-tight">
                       {service.name}
                     </span>
                     <span
-                      className={`inline-flex items-center px-2 py-1 rounded-full text-xs font-bold uppercase ml-2 ${statusColor}`}
+                      className={`inline-flex items-center px-3 py-1 rounded-full text-xs font-bold uppercase ml-2 ${statusColor}`}
                     >
                       {statusIcon}
                       {statusLabel}
                     </span>
                   </div>
-                  {/* Optional: Environment label (if available) */}
-                  {/* <span className="text-xs text-blue-600 font-semibold uppercase">Development</span> */}
                 </div>
                 {/* Endpoint */}
-                <div className="flex items-center bg-gray-100 dark:bg-gray-800 rounded-md px-3 py-1 mb-3 text-xs font-mono text-gray-700 dark:text-gray-200">
+                <div className="flex items-center bg-gray-100 dark:bg-gray-800 rounded-lg px-3 py-2 mb-4 text-xs font-mono text-gray-700 dark:text-gray-200">
                   <span className="truncate flex-1" title={endpoint}>
                     {endpoint}
                   </span>
                   <button
                     onClick={handleCopy}
-                    className="ml-2 text-gray-400 hover:text-primary-600 focus:outline-none"
+                    className="ml-2 text-gray-400 hover:text-primary-600 focus:outline-none transition-colors"
                     title="Copy endpoint"
                   >
                     <svg
@@ -320,7 +318,7 @@ const Services = () => {
                 </div>
                 {/* Error/Healthy Banner */}
                 {isDown ? (
-                  <div className="flex items-center bg-red-100/80 text-red-800 rounded-md px-3 py-2 mb-4 text-sm mt-2">
+                  <div className="flex items-center bg-red-100/80 text-red-800 rounded-lg px-4 py-3 mb-4 text-sm">
                     <ExclamationTriangleIcon className="w-5 h-5 mr-2 text-red-400" />
                     <span className="font-semibold mr-2">
                       Service is unreachable or offline.
@@ -334,19 +332,19 @@ const Services = () => {
                     </button>
                   </div>
                 ) : (
-                  <div className="flex items-center bg-green-100/80 text-green-800 rounded-md px-3 py-2 mb-4 text-xs mt-2">
-                    <ServerIcon className="w-4 h-4 mr-1 text-green-500" />
-                    <span>All systems normal</span>
+                  <div className="flex items-center bg-green-100/80 text-green-800 rounded-lg px-4 py-3 mb-4 text-sm">
+                    <ServerIcon className="w-4 h-4 mr-2 text-green-500" />
+                    <span className="font-medium">All systems normal</span>
                   </div>
                 )}
                 {/* Error details (expandable) */}
                 {isDown && showDetails && service.error && (
-                  <div className="bg-red-50 border border-red-200 rounded p-2 mb-3 text-xs text-red-700 font-mono whitespace-pre-wrap">
+                  <div className="bg-red-50 border border-red-200 rounded-lg p-3 mb-4 text-xs text-red-700 font-mono whitespace-pre-wrap">
                     {service.error}
                   </div>
                 )}
                 {/* Metrics Grid - ALL METRICS */}
-                <div className="grid grid-cols-2 gap-4 mb-4 mt-2">
+                <div className="grid grid-cols-2 gap-4 mb-6 mt-2">
                   <MetricCard
                     title="Health Status"
                     value={
@@ -376,7 +374,7 @@ const Services = () => {
                           N/A
                         </span>
                       ) : (
-                        getMetric(service.metrics?.uptime, " min", 0)
+                        getMetric(service.uptime_minutes, " min", 0)
                       )
                     }
                     subtitle="Minutes"
@@ -554,34 +552,39 @@ const Services = () => {
                     loading={loading}
                   />
                 </div>
-                {/* Footer */}
-                <div className="flex items-center justify-between text-xs text-gray-400 mt-auto pt-2">
-                  <div className="flex items-center">
+                {/* Action Buttons - More Prominent */}
+                <div className="flex items-center justify-between mt-auto pt-6 border-t border-gray-100">
+                  <div className="flex items-center text-xs text-gray-500">
                     <ClockIcon className="w-4 h-4 mr-1" />
                     Last updated:{" "}
                     {service.last_scraped
                       ? dataUtils.formatTimestamp(service.last_scraped * 1000)
                       : "N/A"}
                   </div>
-                  {/* View Details Button */}
-                  {service.name && (
+                  <div className="flex items-center gap-3">
+                    {/* Delete button - Always visible but subtle */}
                     <button
-                      className="btn btn-secondary flex items-center gap-1 px-3 py-1.5 text-xs font-medium shadow-sm hover:scale-105 transition-transform"
-                      onClick={() => navigate(`/services/${service.name}`)}
-                      title="View Details"
+                      className="text-red-500 hover:text-red-700 hover:bg-red-50 p-2 rounded-lg transition-all duration-200 group"
+                      onClick={() =>
+                        handleDeleteRegisteredService(service.name)
+                      }
+                      title="Delete service"
                     >
-                      <EyeIcon className="w-4 h-4 mr-1" /> View Details
+                      <TrashIcon className="w-4 h-4 group-hover:scale-110 transition-transform" />
                     </button>
-                  )}
+                    {/* View Details Button - More prominent */}
+                    {service.name && (
+                      <button
+                        className="btn btn-primary flex items-center gap-2 px-6 py-2.5 text-sm font-semibold shadow-lg hover:shadow-xl hover:scale-105 transition-all duration-200"
+                        onClick={() => navigate(`/services/${service.name}`)}
+                        title="View Details"
+                      >
+                        <EyeIcon className="w-4 h-4" />
+                        <span>View Details</span>
+                      </button>
+                    )}
+                  </div>
                 </div>
-                {/* Delete button (only on hover) */}
-                <button
-                  className="absolute top-4 left-4 opacity-0 group-hover:opacity-100 transition-opacity text-xs text-red-500 hover:text-red-700 focus:outline-none"
-                  onClick={() => handleDeleteRegisteredService(service.name)}
-                  title="Delete service"
-                >
-                  Delete
-                </button>
               </div>
             );
           })}

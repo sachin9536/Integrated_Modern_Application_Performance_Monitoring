@@ -13,6 +13,7 @@ import {
 import { apiService, dataUtils } from "../services/api";
 import StatusBadge from "../components/StatusBadge";
 import toast from "react-hot-toast";
+import { useLocation } from "react-router-dom";
 
 const LOG_LEVELS = [
   { label: "All", value: "ALL" },
@@ -32,6 +33,7 @@ const levelIcon = {
 };
 
 const Logs = () => {
+  const location = useLocation();
   const [logs, setLogs] = useState([]);
   const [filteredLogs, setFilteredLogs] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -50,6 +52,18 @@ const Logs = () => {
 
   const [showFilters, setShowFilters] = useState(false);
   const logsEndRef = useRef(null);
+
+  // Handle URL parameters for service filtering
+  useEffect(() => {
+    const urlParams = new URLSearchParams(location.search);
+    const serviceParam = urlParams.get("service");
+    if (serviceParam) {
+      setFilters((prev) => ({
+        ...prev,
+        service: serviceParam,
+      }));
+    }
+  }, [location.search]);
 
   // Fetch logs data
   const fetchLogs = useCallback(async () => {

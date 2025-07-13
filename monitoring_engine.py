@@ -52,7 +52,7 @@ user_service_metrics = {}  # {service_name: {metrics, status, last_scraped, erro
 
 async def background_user_service_metrics_scraper():
     """Periodically scrape /metrics from user-registered services and cache results."""
-    global user_service_metrics
+    global user_service_metrics, service_uptime_tracker
     while True:
         try:
             # Get all registered services from all users
@@ -62,25 +62,44 @@ async def background_user_service_metrics_scraper():
                 url = svc["url"].rstrip("/")
                 owner = svc["owner"]
                 metrics_url = f"{url}/metrics"
+                current_time = time.time()
+                
                 try:
                     async with httpx.AsyncClient(timeout=5.0) as client:
                         resp = await client.get(metrics_url)
                     if resp.status_code == 200:
                         # Parse Prometheus metrics text format
                         metrics = parse_prometheus_metrics(resp.text)
+                        
+                        # Track uptime internally
+                        if name not in service_uptime_tracker:
+                            service_uptime_tracker[name] = {
+                                "first_seen": current_time,
+                                "last_healthy": current_time
+                            }
+                        else:
+                            service_uptime_tracker[name]["last_healthy"] = current_time
+                        
+                        # Calculate uptime in minutes
+                        uptime_minutes = (current_time - service_uptime_tracker[name]["first_seen"]) / 60
+                        
+                        # Store historical metrics for load forecasting
+                        save_metrics_history(name, metrics, current_time)
+                        
                         user_service_metrics[name] = {
                             "metrics": metrics,
                             "status": "healthy",
-                            "last_scraped": time.time(),
+                            "last_scraped": current_time,
                             "error": None,
                             "owner": owner,
-                            "url": url
+                            "url": url,
+                            "uptime_minutes": uptime_minutes
                         }
                     else:
                         user_service_metrics[name] = {
                             "metrics": {},
                             "status": "unhealthy",
-                            "last_scraped": time.time(),
+                            "last_scraped": current_time,
                             "error": f"Status {resp.status_code}",
                             "owner": owner,
                             "url": url
@@ -89,41 +108,70 @@ async def background_user_service_metrics_scraper():
                     user_service_metrics[name] = {
                         "metrics": {},
                         "status": "unhealthy",
-                        "last_scraped": time.time(),
+                        "last_scraped": current_time,
                         "error": str(e),
                         "owner": owner,
                         "url": url
                     }
         except Exception as e:
             print(f"[User Service Metrics Scraper] Error: {e}")
+        
+        # Save uptime tracker periodically (every 10 minutes)
+        if int(time.time()) % 600 == 0:  # Every 10 minutes
+            save_uptime_tracker()
+            
+        # Clean up old metrics data periodically (every 6 hours)
+        if int(time.time()) % 21600 == 0:  # Every 6 hours
+            cleanup_old_metrics_history(days_to_keep=30)
+            
         await asyncio.sleep(30)  # Scrape every 30 seconds
 
 # Add a new function to scrape metrics for a specific user
 async def scrape_metrics_for_user(user_email: str):
     """Scrape metrics for a specific user's services."""
+    global service_uptime_tracker
     services = get_registered_services_for_user(user_email)
     for svc in services:
         name = svc["name"]
         url = svc["url"].rstrip("/")
         metrics_url = f"{url}/metrics"
+        current_time = time.time()
+        
         try:
             async with httpx.AsyncClient(timeout=5.0) as client:
                 resp = await client.get(metrics_url)
             if resp.status_code == 200:
                 metrics = parse_prometheus_metrics(resp.text)
+                
+                # Track uptime internally
+                if name not in service_uptime_tracker:
+                    service_uptime_tracker[name] = {
+                        "first_seen": current_time,
+                        "last_healthy": current_time
+                    }
+                else:
+                    service_uptime_tracker[name]["last_healthy"] = current_time
+                
+                # Calculate uptime in minutes
+                uptime_minutes = (current_time - service_uptime_tracker[name]["first_seen"]) / 60
+                
+                # Store historical metrics for load forecasting
+                save_metrics_history(name, metrics, current_time)
+                
                 user_service_metrics[name] = {
                     "metrics": metrics,
                     "status": "healthy",
-                    "last_scraped": time.time(),
+                    "last_scraped": current_time,
                     "error": None,
                     "owner": user_email,
-                    "url": url
+                    "url": url,
+                    "uptime_minutes": uptime_minutes
                 }
             else:
                 user_service_metrics[name] = {
                     "metrics": {},
                     "status": "unhealthy",
-                    "last_scraped": time.time(),
+                    "last_scraped": current_time,
                     "error": f"Status {resp.status_code}",
                     "owner": user_email,
                     "url": url
@@ -132,7 +180,7 @@ async def scrape_metrics_for_user(user_email: str):
             user_service_metrics[name] = {
                 "metrics": {},
                 "status": "unhealthy",
-                "last_scraped": time.time(),
+                "last_scraped": current_time,
                 "error": str(e),
                 "owner": user_email,
                 "url": url
@@ -193,11 +241,17 @@ def parse_prometheus_metrics(metrics_text):
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    # Load uptime tracking data on startup
+    load_uptime_tracker()
+    
     task1 = asyncio.create_task(background_log_scanner())
     task2 = asyncio.create_task(background_user_service_metrics_scraper())
     yield
     task1.cancel()
     task2.cancel()
+    
+    # Save uptime tracking data on shutdown
+    save_uptime_tracker()
 
 app = FastAPI(lifespan=lifespan)
 
@@ -222,6 +276,32 @@ CACHE_TTL_SECONDS = 120  # 2 minutes
 
 # Track sent anomalies to avoid duplicate emails (in-memory, resets on restart)
 sent_anomalies = set()
+
+# --- Service uptime tracking (AppVital internal) ---
+service_uptime_tracker = {}  # {service_name: {"first_seen": timestamp, "last_healthy": timestamp}}
+
+def load_uptime_tracker():
+    """Load uptime tracking data from file"""
+    global service_uptime_tracker
+    try:
+        uptime_file = Path("/app/data/service_uptime.json")
+        if uptime_file.exists():
+            with open(uptime_file, "r") as f:
+                service_uptime_tracker = json.load(f)
+                print(f"Loaded uptime tracking data for {len(service_uptime_tracker)} services")
+    except Exception as e:
+        print(f"Error loading uptime tracker: {e}")
+        service_uptime_tracker = {}
+
+def save_uptime_tracker():
+    """Save uptime tracking data to file"""
+    try:
+        uptime_file = Path("/app/data/service_uptime.json")
+        uptime_file.parent.mkdir(exist_ok=True)
+        with open(uptime_file, "w") as f:
+            json.dump(service_uptime_tracker, f, indent=2)
+    except Exception as e:
+        print(f"Error saving uptime tracker: {e}")
 
 # --- Authentication Models and Functions ---
 class RegisterModel(BaseModel):
@@ -1195,6 +1275,22 @@ mongo_db = mongo_client[os.getenv("MONGO_DB", "appvital")]
 services_collection = mongo_db["registered_services"]
 logs_collection = mongo_db["logs"]  # <-- Add this line
 users_collection = mongo_db["users"]  # <-- Add this line
+metrics_history_collection = mongo_db["metrics_history"]  # <-- NEW: For historical metrics storage
+
+# Create indexes for efficient querying
+try:
+    metrics_history_collection.create_index([
+        ("service_name", pymongo.ASCENDING),
+        ("timestamp", pymongo.DESCENDING)
+    ])
+    metrics_history_collection.create_index([
+        ("service_name", pymongo.ASCENDING),
+        ("metric_type", pymongo.ASCENDING),
+        ("timestamp", pymongo.DESCENDING)
+    ])
+    print("Created indexes for metrics_history collection")
+except Exception as e:
+    print(f"Error creating indexes: {e}")
 
 security = HTTPBearer()
 
@@ -1783,6 +1879,53 @@ async def test_endpoint():
     """Simple test endpoint to verify backend is working"""
     return {"message": "Backend is working", "timestamp": datetime.utcnow().isoformat()}
 
+@app.post("/api/reset_uptime/{service_name}")
+async def reset_service_uptime(service_name: str, user_email: str = Depends(get_current_user_email)):
+    """Reset uptime tracking for a specific service (for testing purposes)"""
+    global service_uptime_tracker
+    
+    # Verify service ownership
+    service_doc = services_collection.find_one({"name": service_name, "owner": user_email})
+    if not service_doc:
+        raise HTTPException(status_code=404, detail=f"Service {service_name} not found")
+    
+    # Reset uptime tracking
+    if service_name in service_uptime_tracker:
+        del service_uptime_tracker[service_name]
+        save_uptime_tracker()
+        return {"status": "success", "message": f"Uptime tracking reset for {service_name}"}
+    else:
+        return {"status": "success", "message": f"No uptime tracking found for {service_name}"}
+
+@app.get("/api/uptime_info/{service_name}")
+async def get_uptime_info(service_name: str, user_email: str = Depends(get_current_user_email)):
+    """Get uptime tracking information for a specific service"""
+    global service_uptime_tracker
+    
+    # Verify service ownership
+    service_doc = services_collection.find_one({"name": service_name, "owner": user_email})
+    if not service_doc:
+        raise HTTPException(status_code=404, detail=f"Service {service_name} not found")
+    
+    # Get uptime info
+    uptime_info = service_uptime_tracker.get(service_name, {})
+    if uptime_info:
+        current_time = time.time()
+        uptime_minutes = (current_time - uptime_info["first_seen"]) / 60
+        return {
+            "service_name": service_name,
+            "first_seen": datetime.fromtimestamp(uptime_info["first_seen"]).isoformat(),
+            "last_healthy": datetime.fromtimestamp(uptime_info["last_healthy"]).isoformat(),
+            "uptime_minutes": round(uptime_minutes, 2),
+            "uptime_hours": round(uptime_minutes / 60, 2),
+            "uptime_days": round(uptime_minutes / (60 * 24), 2)
+        }
+    else:
+        return {
+            "service_name": service_name,
+            "message": "No uptime tracking data found"
+        }
+
 @app.get("/api/service_metrics/{service_name}")
 async def api_service_metrics(
     service_name: str,
@@ -1814,16 +1957,17 @@ async def api_service_metrics(
         
         # HTTP Requests Total
         try:
-            response = await httpx.get(
-                f"{PROMETHEUS_URL}/api/v1/query_range",
-                params={
-                    "query": f'http_requests_total{{service="{service_name}"}}',
-                    "start": time.time() - window_seconds,
-                    "end": time.time(),
-                    "step": "60"  # 1 minute intervals
-                },
-                timeout=10
-            )
+            async with httpx.AsyncClient() as client:
+                response = await client.get(
+                    f"{PROMETHEUS_URL}/api/v1/query_range",
+                    params={
+                        "query": f'http_requests_total{{service="{service_name}"}}',
+                        "start": time.time() - window_seconds,
+                        "end": time.time(),
+                        "step": "60"  # 1 minute intervals
+                    },
+                    timeout=10
+                )
             if response.status_code == 200:
                 data = response.json()
                 if data.get("status") == "success" and data.get("data", {}).get("result"):
@@ -1833,16 +1977,17 @@ async def api_service_metrics(
         
         # Errors Total
         try:
-            response = await httpx.get(
-                f"{PROMETHEUS_URL}/api/v1/query_range",
-                params={
-                    "query": f'errors_total{{service="{service_name}"}}',
-                    "start": time.time() - window_seconds,
-                    "end": time.time(),
-                    "step": "60"
-                },
-                timeout=10
-            )
+            async with httpx.AsyncClient() as client:
+                response = await client.get(
+                    f"{PROMETHEUS_URL}/api/v1/query_range",
+                    params={
+                        "query": f'errors_total{{service="{service_name}"}}',
+                        "start": time.time() - window_seconds,
+                        "end": time.time(),
+                        "step": "60"
+                    },
+                    timeout=10
+                )
             if response.status_code == 200:
                 data = response.json()
                 if data.get("status") == "success" and data.get("data", {}).get("result"):
@@ -1852,16 +1997,17 @@ async def api_service_metrics(
         
         # CPU Usage
         try:
-            response = await httpx.get(
-                f"{PROMETHEUS_URL}/api/v1/query_range",
-                params={
-                    "query": f'cpu_percent{{service="{service_name}"}}',
-                    "start": time.time() - window_seconds,
-                    "end": time.time(),
-                    "step": "60"
-                },
-                timeout=10
-            )
+            async with httpx.AsyncClient() as client:
+                response = await client.get(
+                    f"{PROMETHEUS_URL}/api/v1/query_range",
+                    params={
+                        "query": f'cpu_percent{{service="{service_name}"}}',
+                        "start": time.time() - window_seconds,
+                        "end": time.time(),
+                        "step": "60"
+                    },
+                    timeout=10
+                )
             if response.status_code == 200:
                 data = response.json()
                 if data.get("status") == "success" and data.get("data", {}).get("result"):
@@ -1871,16 +2017,17 @@ async def api_service_metrics(
         
         # Memory Usage
         try:
-            response = await httpx.get(
-                f"{PROMETHEUS_URL}/api/v1/query_range",
-                params={
-                    "query": f'memory_used_mb{{service="{service_name}"}}',
-                    "start": time.time() - window_seconds,
-                    "end": time.time(),
-                    "step": "60"
-                },
-                timeout=10
-            )
+            async with httpx.AsyncClient() as client:
+                response = await client.get(
+                    f"{PROMETHEUS_URL}/api/v1/query_range",
+                    params={
+                        "query": f'memory_used_mb{{service="{service_name}"}}',
+                        "start": time.time() - window_seconds,
+                        "end": time.time(),
+                        "step": "60"
+                    },
+                    timeout=10
+                )
             if response.status_code == 200:
                 data = response.json()
                 if data.get("status") == "success" and data.get("data", {}).get("result"):
@@ -1890,16 +2037,17 @@ async def api_service_metrics(
         
         # Total Response Time (average)
         try:
-            response = await httpx.get(
-                f"{PROMETHEUS_URL}/api/v1/query_range",
-                params={
-                    "query": f'rate(total_response_ms_sum{{service="{service_name}"}}[{window}]) / rate(total_response_ms_count{{service="{service_name}"}}[{window}]) * 1000',
-                    "start": time.time() - window_seconds,
-                    "end": time.time(),
-                    "step": "60"
-                },
-                timeout=10
-            )
+            async with httpx.AsyncClient() as client:
+                response = await client.get(
+                    f"{PROMETHEUS_URL}/api/v1/query_range",
+                    params={
+                        "query": f'rate(total_response_ms_sum{{service="{service_name}"}}[{window}]) / rate(total_response_ms_count{{service="{service_name}"}}[{window}]) * 1000',
+                        "start": time.time() - window_seconds,
+                        "end": time.time(),
+                        "step": "60"
+                    },
+                    timeout=10
+                )
             if response.status_code == 200:
                 data = response.json()
                 if data.get("status") == "success" and data.get("data", {}).get("result"):
@@ -2069,6 +2217,259 @@ async def service_response_time_timeseries(
             "count": count
         })
     return result
+
+@app.get("/api/service_metrics/{service_name}/errors_timeseries")
+async def service_errors_timeseries(
+    service_name: str,
+    window: str = Query("6h"),
+    interval: str = Query("5m")
+):
+    now = datetime.utcnow()
+    # Parse window and interval
+    if window.endswith("h"):
+        window_td = timedelta(hours=int(window[:-1]))
+    elif window.endswith("d"):
+        window_td = timedelta(days=int(window[:-1]))
+    elif window.endswith("m"):
+        window_td = timedelta(minutes=int(window[:-1]))
+    else:
+        window_td = timedelta(hours=6)
+    if interval.endswith("h"):
+        interval_td = timedelta(hours=int(interval[:-1]))
+    elif interval.endswith("d"):
+        interval_td = timedelta(days=int(interval[:-1]))
+    elif interval.endswith("m"):
+        interval_td = timedelta(minutes=int(interval[:-1]))
+    else:
+        interval_td = timedelta(minutes=5)
+    start_time = now - window_td
+    interval_seconds = int(interval_td.total_seconds())
+    # Filter logs for this service
+    logs = [log for log in parsed_logs if log.get("service") == service_name]
+    # Bucket by interval
+    buckets = defaultdict(lambda: {"errors": 0})
+    for log in logs:
+        ts = log.get("timestamp")
+        if not ts:
+            continue
+        try:
+            log_time = dateutil_parser.parse(ts).replace(tzinfo=None)
+        except Exception:
+            continue
+        if log_time < start_time or log_time > now:
+            continue
+        if log.get("level") == "ERROR" or "error" in log.get("message", "").lower():
+            bucket_start_ts = int((log_time.timestamp() // interval_seconds) * interval_seconds)
+            bucket_key = datetime.utcfromtimestamp(bucket_start_ts).strftime("%Y-%m-%dT%H:%M:00Z")
+            buckets[bucket_key]["errors"] += 1
+    result = []
+    for bucket in sorted(buckets.keys()):
+        result.append({
+            "time": bucket,
+            "errors": buckets[bucket]["errors"]
+        })
+    return result
+
+def save_metrics_history(service_name: str, metrics: dict, timestamp: float):
+    """Store historical metrics data for load forecasting"""
+    try:
+        # Store CPU metrics
+        if 'cpu_percent' in metrics:
+            metrics_history_collection.insert_one({
+                "service_name": service_name,
+                "metric_type": "cpu_percent",
+                "value": float(metrics['cpu_percent']),
+                "timestamp": datetime.fromtimestamp(timestamp),
+                "created_at": datetime.utcnow()
+            })
+        
+        # Store memory metrics
+        if 'memory_used_mb' in metrics:
+            metrics_history_collection.insert_one({
+                "service_name": service_name,
+                "metric_type": "memory_used_mb",
+                "value": float(metrics['memory_used_mb']),
+                "timestamp": datetime.fromtimestamp(timestamp),
+                "created_at": datetime.utcnow()
+            })
+        
+        # Store HTTP request metrics
+        if 'http_requests_total' in metrics:
+            metrics_history_collection.insert_one({
+                "service_name": service_name,
+                "metric_type": "http_requests_total",
+                "value": float(metrics['http_requests_total']),
+                "timestamp": datetime.fromtimestamp(timestamp),
+                "created_at": datetime.utcnow()
+            })
+        
+        # Store error metrics
+        if 'errors_total' in metrics:
+            metrics_history_collection.insert_one({
+                "service_name": service_name,
+                "metric_type": "errors_total",
+                "value": float(metrics['errors_total']),
+                "timestamp": datetime.fromtimestamp(timestamp),
+                "created_at": datetime.utcnow()
+            })
+            
+    except Exception as e:
+        print(f"Error saving metrics history for {service_name}: {e}")
+
+def cleanup_old_metrics_history(days_to_keep: int = 30):
+    """Clean up old metrics data to prevent database bloat"""
+    try:
+        cutoff_date = datetime.utcnow() - timedelta(days=days_to_keep)
+        result = metrics_history_collection.delete_many({
+            "timestamp": {"$lt": cutoff_date}
+        })
+        if result.deleted_count > 0:
+            print(f"Cleaned up {result.deleted_count} old metrics records")
+    except Exception as e:
+        print(f"Error cleaning up old metrics: {e}")
+
+@app.get("/api/service_metrics/{service_name}/cpu_history")
+async def service_cpu_history(
+    service_name: str,
+    window: str = Query("24h", description="Time window, e.g. 1h, 6h, 24h, 7d")
+):
+    now = datetime.utcnow()
+    if window.endswith("h"):
+        window_td = timedelta(hours=int(window[:-1]))
+    elif window.endswith("d"):
+        window_td = timedelta(days=int(window[:-1]))
+    elif window.endswith("m"):
+        window_td = timedelta(minutes=int(window[:-1]))
+    else:
+        window_td = timedelta(hours=24)
+    start_time = now - window_td
+    cursor = metrics_history_collection.find({
+        "service_name": service_name,
+        "metric_type": "cpu_percent",
+        "timestamp": {"$gte": start_time, "$lte": now}
+    }).sort("timestamp", 1)
+    data = [
+        {"time": doc["timestamp"].isoformat() + "Z", "cpu_percent": doc["value"]}
+        for doc in cursor
+    ]
+    return {
+        "service_name": service_name,
+        "window": window,
+        "data": data,
+        "count": len(data)
+    }
+
+@app.get("/api/service_metrics/{service_name}/memory_history")
+async def service_memory_history(
+    service_name: str,
+    window: str = Query("24h", description="Time window, e.g. 1h, 6h, 24h, 7d")
+):
+    now = datetime.utcnow()
+    if window.endswith("h"):
+        window_td = timedelta(hours=int(window[:-1]))
+    elif window.endswith("d"):
+        window_td = timedelta(days=int(window[:-1]))
+    elif window.endswith("m"):
+        window_td = timedelta(minutes=int(window[:-1]))
+    else:
+        window_td = timedelta(hours=24)
+    start_time = now - window_td
+    cursor = metrics_history_collection.find({
+        "service_name": service_name,
+        "metric_type": "memory_used_mb",
+        "timestamp": {"$gte": start_time, "$lte": now}
+    }).sort("timestamp", 1)
+    data = [
+        {"time": doc["timestamp"].isoformat() + "Z", "memory_mb": doc["value"]}
+        for doc in cursor
+    ]
+    return {
+        "service_name": service_name,
+        "window": window,
+        "data": data,
+        "count": len(data)
+    }
+
+@app.get("/api/service_metrics/{service_name}/load_forecast")
+async def service_load_forecast(
+    service_name: str,
+    forecast_hours: int = Query(24, description="Hours to forecast", ge=1, le=168),
+    user_email: str = Depends(get_current_user_email)
+):
+    """Get load forecasting data for a specific service based on historical patterns"""
+    try:
+        # Verify service ownership
+        service_doc = services_collection.find_one({"name": service_name, "owner": user_email})
+        if not service_doc:
+            raise HTTPException(status_code=404, detail=f"Service {service_name} not found")
+        
+        # Get historical data for the last 7 days to establish patterns
+        now = datetime.utcnow()
+        start_time = now - timedelta(days=7)
+        
+        # Get CPU and memory data
+        cpu_cursor = metrics_history_collection.find({
+            "service_name": service_name,
+            "metric_type": "cpu_percent",
+            "timestamp": {"$gte": start_time, "$lte": now}
+        }).sort("timestamp", 1)
+        
+        memory_cursor = metrics_history_collection.find({
+            "service_name": service_name,
+            "metric_type": "memory_used_mb",
+            "timestamp": {"$gte": start_time, "$lte": now}
+        }).sort("timestamp", 1)
+        
+        # Process historical data for pattern analysis
+        cpu_data = [doc["value"] for doc in cpu_cursor]
+        memory_data = [doc["value"] for doc in memory_cursor]
+        
+        # Simple forecasting based on historical averages and trends
+        # In a production system, you'd use more sophisticated ML models
+        forecast_data = []
+        
+        if cpu_data and memory_data:
+            # Calculate baseline averages
+            avg_cpu = sum(cpu_data) / len(cpu_data)
+            avg_memory = sum(memory_data) / len(memory_data)
+            
+            # Simple trend calculation (linear regression approximation)
+            if len(cpu_data) > 1:
+                cpu_trend = (cpu_data[-1] - cpu_data[0]) / len(cpu_data)
+                memory_trend = (memory_data[-1] - memory_data[0]) / len(memory_data)
+            else:
+                cpu_trend = 0
+                memory_trend = 0
+            
+            # Generate forecast points
+            for hour in range(1, forecast_hours + 1):
+                forecast_time = now + timedelta(hours=hour)
+                forecast_cpu = max(0, min(100, avg_cpu + (cpu_trend * hour)))
+                forecast_memory = max(0, avg_memory + (memory_trend * hour))
+                
+                forecast_data.append({
+                    "time": forecast_time.isoformat() + "Z",
+                    "cpu_percent": round(forecast_cpu, 2),
+                    "memory_mb": round(forecast_memory, 2),
+                    "confidence": "medium"  # Placeholder for ML confidence scores
+                })
+        
+        return {
+            "service_name": service_name,
+            "forecast_hours": forecast_hours,
+            "historical_data_points": len(cpu_data),
+            "forecast": forecast_data,
+            "baseline": {
+                "avg_cpu_percent": round(sum(cpu_data) / len(cpu_data), 2) if cpu_data else 0,
+                "avg_memory_mb": round(sum(memory_data) / len(memory_data), 2) if memory_data else 0
+            }
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"Error in service_load_forecast: {e}")
+        raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
 
 @app.get("/api/service_metrics/{service_name}/errors_timeseries")
 async def service_errors_timeseries(

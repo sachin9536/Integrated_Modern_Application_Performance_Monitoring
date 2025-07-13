@@ -39,19 +39,28 @@ services:
   # Mongo Express UI
   # ======================
   mongo-express:
-    image: mongo-express
+    image: mongo-express:latest
     container_name: mongo-express
     ports:
       - "8081:8081"
     environment:
       - ME_CONFIG_MONGODB_SERVER=mongodb
+      - ME_CONFIG_MONGODB_PORT=27017
       - ME_CONFIG_MONGODB_ADMINUSERNAME=admin
       - ME_CONFIG_MONGODB_ADMINPASSWORD=secret
       - ME_CONFIG_MONGODB_ENABLE_ADMIN=true
       - ME_CONFIG_BASICAUTH=false
+      - ME_CONFIG_MONGODB_AUTH_DATABASE=admin
     depends_on:
       mongodb:
         condition: service_healthy
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8081"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
     networks:
       - private_net
 
@@ -237,7 +246,8 @@ services:
       - CONTROLLER_USER_PASSWORD=testpass123
       # Add other env vars as needed
     depends_on:
-      - monitoring_engine
+      monitoring_engine:
+        condition: service_healthy
     volumes:
       - ./logs:/app/logs
     restart: unless-stopped

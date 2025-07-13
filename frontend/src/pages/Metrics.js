@@ -27,8 +27,10 @@ import MetricCard from "../components/MetricCard";
 import toast from "react-hot-toast";
 import { useAuth } from "../AuthContext";
 import { Tooltip as RechartsTooltip } from "recharts";
+import { useLocation } from "react-router-dom";
 
 const Metrics = () => {
+  const location = useLocation();
   const [metrics, setMetrics] = useState(null);
   const [prometheusData, setPrometheusData] = useState(null);
   const [errorRateSeries, setErrorRateSeries] = useState([]);
@@ -66,6 +68,20 @@ const Metrics = () => {
   const { logout } = useAuth();
   const [fetchError, setFetchError] = useState(null);
 
+  // Handle URL parameters for service filtering
+  useEffect(() => {
+    const urlParams = new URLSearchParams(location.search);
+    const serviceParam = urlParams.get("service");
+    if (serviceParam && registeredServices.length > 0) {
+      const serviceExists = registeredServices.find(
+        (s) => s.name === serviceParam
+      );
+      if (serviceExists) {
+        setSelectedService(serviceParam);
+      }
+    }
+  }, [location.search, registeredServices]);
+
   // Fetch registered services with robust error handling
   const fetchRegisteredServices = async () => {
     setFetchError(null);
@@ -74,13 +90,19 @@ const Metrics = () => {
       const services = response.registered_services || [];
       console.log("Fetched registered services (Metrics):", services);
       setRegisteredServices(services);
-      if (
+
+      // Check for service parameter in URL
+      const urlParams = new URLSearchParams(location.search);
+      const serviceParam = urlParams.get("service");
+
+      if (serviceParam && services.find((s) => s.name === serviceParam)) {
+        setSelectedService(serviceParam);
+      } else if (
         services.length > 0 &&
         (selectedService === "all" || !selectedService)
       ) {
         setSelectedService(services[0].name);
-      }
-      if (services.length === 0) {
+      } else if (services.length === 0) {
         setSelectedService("all");
       }
     } catch (error) {
@@ -715,44 +737,39 @@ const Metrics = () => {
           </ResponsiveContainer>
         </div>
 
-        {/* Response Code Distribution */}
-        <div className="card">
-          <div className="card-header">
-            <h2 className="card-title">
-              {selectedService === "all"
-                ? "Response Code Distribution"
-                : "Request Summary"}
-            </h2>
+        {/* Pie Chart Section */}
+        {selectedService === "all" ? (
+          <div className="card">
+            <div className="card-header">
+              <h2 className="card-title">Response Code Distribution</h2>
+            </div>
+            <ResponsiveContainer width="100%" height={300}>
+              <PieChart>
+                <Pie
+                  data={responseCodeData}
+                  cx="50%"
+                  cy="50%"
+                  labelLine={false}
+                  label={({ name, percent }) =>
+                    `${name} ${(percent * 100).toFixed(0)}%`
+                  }
+                  outerRadius={80}
+                  fill="#8884d8"
+                  dataKey="value"
+                >
+                  {responseCodeData.map((entry, index) => (
+                    <Cell key={`cell-${index}`} fill={entry.color} />
+                  ))}
+                </Pie>
+                <Tooltip />
+              </PieChart>
+            </ResponsiveContainer>
           </div>
-          <ResponsiveContainer width="100%" height={300}>
-            <PieChart>
-              <Pie
-                data={responseCodeData}
-                cx="50%"
-                cy="50%"
-                labelLine={false}
-                label={({ name, percent }) =>
-                  `${name} ${(percent * 100).toFixed(0)}%`
-                }
-                outerRadius={80}
-                fill="#8884d8"
-                dataKey="value"
-              >
-                {responseCodeData.map((entry, index) => (
-                  <Cell key={`cell-${index}`} fill={entry.color} />
-                ))}
-              </Pie>
-              <Tooltip />
-            </PieChart>
-          </ResponsiveContainer>
-        </div>
-
-        {/* Request Summary (per-service pie chart) */}
-        <div className="card">
-          <div className="card-header">
-            <h2 className="card-title">Request Summary</h2>
-          </div>
-          {selectedService !== "all" ? (
+        ) : (
+          <div className="card">
+            <div className="card-header">
+              <h2 className="card-title">Request Summary</h2>
+            </div>
             <ResponsiveContainer width="100%" height={300}>
               <PieChart>
                 <Pie
@@ -771,15 +788,11 @@ const Metrics = () => {
                     <Cell key={`cell-${index}`} fill={entry.color} />
                   ))}
                 </Pie>
-                <RechartsTooltip />
+                <Tooltip />
               </PieChart>
             </ResponsiveContainer>
-          ) : (
-            <div className="flex items-center justify-center h-full text-gray-400">
-              Select a service to see request summary
-            </div>
-          )}
-        </div>
+          </div>
+        )}
       </div>
 
       {/* System Metrics - Only show for "All Services" */}
