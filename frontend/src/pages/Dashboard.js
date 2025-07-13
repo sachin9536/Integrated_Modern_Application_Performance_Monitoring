@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from "react";
-import { Link } from "react-router-dom";
+import { Link, useNavigate } from "react-router-dom";
 import {
   ServerIcon,
   DocumentTextIcon,
@@ -24,6 +24,8 @@ const Dashboard = () => {
   // --- System Overview State ---
   const [systemOverview, setSystemOverview] = useState(null);
   const [sysLoading, setSysLoading] = useState(true);
+
+  const navigate = useNavigate();
 
   // Fetch all dashboard data
   const fetchDashboardData = async () => {
@@ -172,7 +174,14 @@ const Dashboard = () => {
         </Link>
         {/* Database Connections Card */}
         <div
-          className={`flex-1 rounded-2xl p-6 shadow-md border bg-green-50 border-green-200 flex flex-col justify-between min-w-[250px] animate-fadeIn`}
+          className="card hover:shadow-lg transition cursor-pointer"
+          onClick={() => navigate("/databases")}
+          role="button"
+          tabIndex={0}
+          aria-label="Go to Database Management"
+          onKeyPress={(e) => {
+            if (e.key === "Enter" || e.key === " ") navigate("/databases");
+          }}
         >
           <div className="flex items-center justify-between mb-2">
             <span className="font-bold text-xl flex items-center">

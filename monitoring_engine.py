@@ -22,6 +22,7 @@ from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pymongo import MongoClient
 import pymongo
 from passlib.hash import bcrypt
+from urllib.parse import urlparse
 
 # Optional: pip install ollama
 try:
@@ -36,6 +37,16 @@ try:
 except ImportError:
     SendGridAPIClient = None
     Mail = None
+
+# Add imports for PostgreSQL and MySQL
+try:
+    import psycopg2
+except ImportError:
+    psycopg2 = None
+try:
+    import mysql.connector
+except ImportError:
+    mysql = None
 
 LOG_PATH = Path("/app/logs/metrics.log")
 PROMETHEUS_URL = os.getenv("PROMETHEUS_URL", "http://prometheus:9090")
@@ -254,9 +265,11 @@ async def lifespan(app: FastAPI):
     
     task1 = asyncio.create_task(background_log_scanner())
     task2 = asyncio.create_task(background_user_service_metrics_scraper())
+    task3 = asyncio.create_task(background_db_health_checker())
     yield
     task1.cancel()
     task2.cancel()
+    task3.cancel()
     
     # Save uptime tracking data on shutdown
     save_uptime_tracker()
@@ -1538,15 +1551,169 @@ async def api_databases():
         ]
     }
 
+def check_postgres_health(uri):
+    import time
+    import re
+    from urllib.parse import urlparse
+    start = time.time()
+    dsn = uri
+    # If URI starts with postgresql://, parse and convert to DSN
+    if uri.startswith("postgresql://"):
+        parsed = urlparse(uri)
+        user = parsed.username or ""
+        password = parsed.password or ""
+        host = parsed.hostname or "localhost"
+        port = parsed.port or 5432
+        dbname = parsed.path.lstrip("/")
+        dsn = f"host={host} port={port} dbname={dbname} user={user} password={password}"
+    try:
+        conn = psycopg2.connect(dsn, connect_timeout=3)
+        cur = conn.cursor()
+        cur.execute('SELECT 1;')
+        cur.fetchone()
+        response_time = int((time.time() - start) * 1000)
+        host = conn.get_dsn_parameters().get('host', '-')
+        port = conn.get_dsn_parameters().get('port', '-')
+        cur.close()
+        conn.close()
+        return {
+            "status": "connected",
+            "response_time_ms": response_time,
+            "host": host,
+            "port": port,
+            "error": None,
+            "last_checked": datetime.utcnow().isoformat()
+        }
+    except Exception as e:
+        return {
+            "status": "disconnected",
+            "response_time_ms": None,
+            "host": "-",
+            "port": "-",
+            "error": str(e),
+            "last_checked": datetime.utcnow().isoformat()
+        }
+
+def check_mysql_health(uri):
+    import time
+    try:
+        import mysql.connector
+    except ImportError:
+        return {
+            "status": "disconnected",
+            "response_time_ms": None,
+            "host": "-",
+            "port": "-",
+            "error": "mysql-connector-python not installed",
+            "last_checked": datetime.utcnow().isoformat()
+        }
+    start = time.time()
+    try:
+        # Parse MySQL URI: mysql://user:pass@host:port/db
+        from urllib.parse import urlparse
+        parsed = urlparse(uri)
+        conn = mysql.connector.connect(
+            user=parsed.username,
+            password=parsed.password,
+            host=parsed.hostname,
+            port=parsed.port or 3306,
+            database=parsed.path.lstrip('/')
+        )
+        cur = conn.cursor()
+        cur.execute('SELECT 1;')
+        cur.fetchone()
+        response_time = int((time.time() - start) * 1000)
+        host = parsed.hostname or "-"
+        port = parsed.port or 3306
+        cur.close()
+        conn.close()
+        return {
+            "status": "connected",
+            "response_time_ms": response_time,
+            "host": host,
+            "port": port,
+            "error": None,
+            "last_checked": datetime.utcnow().isoformat()
+        }
+    except Exception as e:
+        host = parsed.hostname if 'parsed' in locals() else "-"
+        port = parsed.port if 'parsed' in locals() else "-"
+        return {
+            "status": "disconnected",
+            "response_time_ms": None,
+            "host": host,
+            "port": port,
+            "error": str(e),
+            "last_checked": datetime.utcnow().isoformat()
+        }
+
+def check_database_health(db_type, uri):
+    if db_type == "mongodb":
+        return check_mongo_health(uri)
+    elif db_type == "postgresql":
+        return check_postgres_health(uri)
+    elif db_type == "mysql":
+        return check_mysql_health(uri)
+    else:
+        return {
+            "status": "disconnected",
+            "response_time_ms": None,
+            "host": "-",
+            "port": "-",
+            "error": f"Unsupported database type: {db_type}",
+            "last_checked": datetime.utcnow().isoformat()
+        }
+
 @app.post("/api/databases")
 async def add_database(data: dict):
-    """Add a new database"""
-    return {"status": "success", "message": f"Database {data.get('name')} added successfully"}
+    """Add a new database (MongoDB, PostgreSQL, MySQL) and check its health, storing in MongoDB."""
+    name = data.get("name")
+    uri = data.get("uri")
+    db_type = data.get("type", "mongodb")
+    if not name or not uri or not db_type:
+        return {"status": "error", "message": "Name, URI, and type are required"}
+    # Check if already exists
+    existing = db_mgmt_collection.find_one({"name": name})
+    if existing:
+        return {"status": "error", "message": f"Database '{name}' already exists"}
+    # Health check
+    health = check_database_health(db_type, uri)
+    db_doc = {
+        "name": name,
+        "uri": uri,
+        "type": db_type,
+        **health
+    }
+    db_mgmt_collection.insert_one(db_doc)
+    return {"status": "success", "message": f"Database '{name}' added successfully", **db_doc}
+
+@app.get("/api/databases")
+async def api_databases():
+    """Return all registered databases with their latest status."""
+    dbs = list(db_mgmt_collection.find({}))
+    for db in dbs:
+        db["_id"] = str(db["_id"])
+    return {"databases": dbs}
 
 @app.delete("/api/databases")
 async def remove_database(name: str):
-    """Remove a database"""
-    return {"status": "success", "message": f"Database {name} removed successfully"}
+    result = db_mgmt_collection.delete_one({"name": name})
+    if result.deleted_count == 0:
+        return {"status": "error", "message": f"Database '{name}' not found"}
+    return {"status": "success", "message": f"Database '{name}' removed successfully"}
+
+# --- Periodic Health Check ---
+async def background_db_health_checker():
+    while True:
+        dbs = list(db_mgmt_collection.find({}))
+        for db in dbs:
+            uri = db.get("uri")
+            db_type = db.get("type", "mongodb")
+            if not uri:
+                continue
+            health = check_database_health(db_type, uri)
+            db_mgmt_collection.update_one({"_id": db["_id"]}, {"$set": health})
+        await asyncio.sleep(60)  # Check every 60 seconds
 
 @app.post("/api/ingest_log")
 async def ingest_logs(data: dict):
@@ -2636,3 +2803,57 @@ async def service_errors_timeseries(
             "errors": buckets[bucket]["errors"]
         })
     return result
+
+def parse_mongo_uri(uri):
+    try:
+        parsed = urlparse(uri)
+        host = parsed.hostname or "-"
+        port = parsed.port or 27017
+        return host, port
+    except Exception:
+        return "-", "-"
+
+def check_mongo_health(uri):
+    import time
+    from pymongo import MongoClient as PyMongoClient
+    start = time.time()
+    try:
+        client = PyMongoClient(uri, serverSelectionTimeoutMS=3000)
+        client.admin.command('ping')
+        response_time = int((time.time() - start) * 1000)
+        host, port = parse_mongo_uri(uri)
+        client.close()
+        return {
+            "status": "connected",
+            "response_time_ms": response_time,
+            "host": host,
+            "port": port,
+            "error": None,
+            "last_checked": datetime.utcnow().isoformat()
+        }
+    except Exception as e:
+        host, port = parse_mongo_uri(uri)
+        return {
+            "status": "disconnected",
+            "response_time_ms": None,
+            "host": host,
+            "port": port,
+            "error": str(e),
+            "last_checked": datetime.utcnow().isoformat()
+        }
+
+# --- Registered Databases Collection ---
+db_mgmt_collection = mongo_db["registered_databases"]
+
+@app.post("/api/databases/test_connection")
+async def test_database_connection(data: dict):
+    """Test a database connection for the given type and URI, without saving."""
+    db_type = data.get("type", "mongodb")
+    uri = data.get("uri")
+    if not uri or not db_type:
+        return {"success": False, "message": "Type and URI are required"}
+    health = check_database_health(db_type, uri)
+    if health["status"] == "connected":
+        return {"success": True, "message": f"Successfully connected to {db_type} database.", **health}
+    else:
+        return {"success": False, "message": health.get("error", "Connection failed"), **health}

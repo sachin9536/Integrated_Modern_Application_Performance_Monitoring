@@ -18,3 +18,5 @@ pydantic[email]
 email-validator
 PyJWT>=2.8.0
 passlib[bcrypt]
+psycopg2-binary
+mysql-connector-python

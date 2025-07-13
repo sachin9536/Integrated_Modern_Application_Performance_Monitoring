@@ -10,19 +10,33 @@ const DatabaseManagement = () => {
     disconnected: 0,
   });
   const [loading, setLoading] = useState(true);
-  const [form, setForm] = useState({ name: "", uri: "" });
+  const [form, setForm] = useState({ name: "", uri: "", type: "mongodb" });
+  const dbTypes = [
+    { value: "mongodb", label: "MongoDB" },
+    { value: "postgresql", label: "PostgreSQL" },
+    { value: "mysql", label: "MySQL" },
+  ];
   const [adding, setAdding] = useState(false);
   const [error, setError] = useState("");
+  const [testResult, setTestResult] = useState(null);
+  const [testing, setTesting] = useState(false);
 
   const fetchDatabases = async () => {
     setLoading(true);
     try {
       const data = await apiService.getDatabases();
       setDatabases(data.databases);
+      // Calculate counts from the databases array
+      const connected = data.databases.filter(
+        (db) => db.status === "connected"
+      ).length;
+      const disconnected = data.databases.filter(
+        (db) => db.status !== "connected"
+      ).length;
       setCounts({
-        total: data.total,
-        connected: data.connected,
-        disconnected: data.disconnected,
+        total: data.databases.length,
+        connected,
+        disconnected,
       });
     } catch (e) {
       setError("Failed to load databases");
@@ -46,16 +60,38 @@ const DatabaseManagement = () => {
     setError("");
     try {
       const res = await apiService.addDatabase(form);
-      if (res.success) {
-        setForm({ name: "", uri: "" });
+      if (res.status === "success" || res.success) {
+        setForm({ name: "", uri: "", type: "mongodb" });
         fetchDatabases();
       } else {
-        setError(res.message || "Failed to add database");
+        setError(res.message || res.error || "Failed to add database");
       }
     } catch (e) {
-      setError("Failed to add database");
+      // Try to show backend error message if available
+      setError(
+        e?.response?.data?.message || e?.message || "Failed to add database"
+      );
     }
     setAdding(false);
+  };
+
+  const handleTestConnection = async (e) => {
+    e.preventDefault();
+    setTesting(true);
+    setTestResult(null);
+    try {
+      const res = await apiService.testDatabaseConnection({
+        type: form.type,
+        uri: form.uri,
+      });
+      setTestResult(res);
+    } catch (err) {
+      setTestResult({
+        success: false,
+        message: err?.response?.data?.message || err.message || "Test failed",
+      });
+    }
+    setTesting(false);
   };
 
   const handleRemoveDatabase = async (name) => {
@@ -106,6 +142,24 @@ const DatabaseManagement = () => {
           <form onSubmit={handleAddDatabase} className="space-y-4">
             <div>
               <label className="block text-sm font-medium mb-1">
+                Database Type
+              </label>
+              <select
+                name="type"
+                value={form.type}
+                onChange={handleInputChange}
+                className="input w-full"
+                required
+              >
+                {dbTypes.map((db) => (
+                  <option key={db.value} value={db.value}>
+                    {db.label}
+                  </option>
+                ))}
+              </select>
+            </div>
+            <div>
+              <label className="block text-sm font-medium mb-1">
                 Database Name
               </label>
               <input
@@ -120,7 +174,11 @@ const DatabaseManagement = () => {
             </div>
             <div>
               <label className="block text-sm font-medium mb-1">
-                MongoDB URI
+                {form.type === "mongodb"
+                  ? "MongoDB URI"
+                  : form.type === "postgresql"
+                  ? "PostgreSQL URI"
+                  : "MySQL URI"}
               </label>
               <input
                 type="text"
@@ -128,18 +186,45 @@ const DatabaseManagement = () => {
                 value={form.uri}
                 onChange={handleInputChange}
                 className="input w-full"
-                placeholder="mongodb://username:password@host:port/dbname"
+                placeholder={
+                  form.type === "mongodb"
+                    ? "mongodb://username:password@host:port/dbname"
+                    : form.type === "postgresql"
+                    ? "postgresql://username:password@host:port/dbname"
+                    : "mysql://username:password@host:port/dbname"
+                }
                 required
               />
             </div>
+            <div className="flex gap-2">
+              <button
+                type="button"
+                className="btn btn-secondary flex-1"
+                onClick={handleTestConnection}
+                disabled={testing || !form.uri || !form.type}
+              >
+                {testing ? "Testing..." : "Test Connection"}
+              </button>
+              <button
+                type="submit"
+                className="btn btn-primary flex-1"
+                disabled={adding || (testResult && !testResult.success)}
+              >
+                {adding ? "Adding..." : "Add Database"}
+              </button>
+            </div>
+            {testResult && (
+              <div
+                className={
+                  testResult.success
+                    ? "text-success-700 text-sm"
+                    : "text-danger-600 text-sm"
+                }
+              >
+                {testResult.message}
+              </div>
+            )}
             {error && <div className="text-danger-600 text-sm">{error}</div>}
-            <button
-              type="submit"
-              className="btn btn-primary w-full"
-              disabled={adding}
-            >
-              {adding ? "Adding..." : "Add Database"}
-            </button>
           </form>
         </div>
       </div>
@@ -165,6 +250,11 @@ const DatabaseManagement = () => {
               <div className="flex items-center justify-between mb-2">
                 <div className="font-bold text-lg text-primary-700">
                   {db.name}
+                  <span className="ml-2 text-xs font-semibold px-2 py-0.5 rounded bg-gray-100 text-gray-700 border border-gray-200">
+                    {db.type
+                      ? db.type.charAt(0).toUpperCase() + db.type.slice(1)
+                      : ""}
+                  </span>
                 </div>
                 <StatusBadge
                   status={db.status === "connected" ? "healthy" : "error"}
@@ -174,7 +264,11 @@ const DatabaseManagement = () => {
               <div className="text-xs text-gray-500 mb-1">{db.uri}</div>
               {db.status === "connected" ? (
                 <div className="text-sm text-success-700 mb-1">
-                  Response Time: {db.response_time_ms} ms
+                  Response Time:{" "}
+                  {db.response_time_ms !== undefined &&
+                  db.response_time_ms !== null
+                    ? db.response_time_ms + " ms"
+                    : "N/A"}
                   <br />
                   Host: {db.host || "-"} <br />
                   Port: {db.port || "-"}
@@ -185,7 +279,10 @@ const DatabaseManagement = () => {
                 </div>
               )}
               <div className="text-xs text-gray-400 mt-1">
-                Last checked: {new Date(db.last_checked).toLocaleString()}
+                Last checked:{" "}
+                {db.last_checked
+                  ? new Date(db.last_checked).toLocaleString()
+                  : "N/A"}
               </div>
               <button
                 className="btn btn-danger btn-sm mt-2 self-end"
@@ -202,4 +299,3 @@ const DatabaseManagement = () => {
 };
 
 export default DatabaseManagement;
- 

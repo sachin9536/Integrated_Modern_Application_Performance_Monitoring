@@ -285,13 +285,22 @@ export const apiService = {
     return response.data;
   },
 
-  async addDatabase({ name, uri }) {
-    const response = await api.post("/api/databases", { name, uri });
+  async addDatabase({ name, uri, type }) {
+    const response = await api.post("/api/databases", { name, uri, type });
     return response.data;
   },
 
   async removeDatabase(name) {
     const response = await api.delete(`/api/databases`, { params: { name } });
+    return response.data;
+  },
+
+  // Test database connection before saving
+  async testDatabaseConnection({ type, uri }) {
+    const response = await api.post("/api/databases/test_connection", {
+      type,
+      uri,
+    });
     return response.data;
   },
 
