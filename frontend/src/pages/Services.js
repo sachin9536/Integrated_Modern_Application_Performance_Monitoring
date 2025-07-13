@@ -373,17 +373,20 @@ const Services = () => {
                         >
                           N/A
                         </span>
+                      ) : service.uptime !== undefined &&
+                        service.uptime !== null ? (
+                        getMetric(service.uptime, " min", 0)
                       ) : (
-                        getMetric(service.uptime_minutes, " min", 0)
+                        <span className="text-gray-400">N/A</span>
                       )
                     }
-                    subtitle="Minutes"
+                    subtitle="Since Last Restart"
                     icon={ClockIcon}
                     color={isDown ? "gray" : "primary"}
                     loading={loading}
                   />
                   <MetricCard
-                    title="Avg Latency"
+                    title="Average Latency"
                     value={
                       isDown ? (
                         <span
@@ -401,7 +404,7 @@ const Services = () => {
                         )
                       )
                     }
-                    subtitle="Avg Response"
+                    subtitle="Average Response Time"
                     icon={ChartBarIcon}
                     color={
                       isDown

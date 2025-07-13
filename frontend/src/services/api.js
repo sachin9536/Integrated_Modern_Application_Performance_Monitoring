@@ -103,8 +103,10 @@ export const apiService = {
   },
 
   // Logs
-  async getLogs() {
-    const response = await api.get(API_ENDPOINTS.LOGS);
+  async getLogs(limit = 1000, offset = 0) {
+    const response = await api.get(API_ENDPOINTS.LOGS, {
+      params: { limit, offset },
+    });
     return response.data;
   },
 
@@ -128,6 +130,12 @@ export const apiService = {
   // Ollama
   async testOllama() {
     const response = await api.get(API_ENDPOINTS.OLLAMA_TEST);
+    return response.data;
+  },
+
+  // GROQ
+  async testGroq() {
+    const response = await api.get("/api/test_groq");
     return response.data;
   },
 
@@ -204,6 +212,7 @@ export const apiService = {
 
   // AI Log Summary (General)
   async getAiLogSummary(logCount = 200) {
+    // Reduced back to 200 for faster processing
     const response = await api.get("/api/ai_analysis", {
       params: { log_count: logCount, mode: "summary" },
     });
@@ -211,7 +220,8 @@ export const apiService = {
   },
 
   // AI Root Cause Analysis (Full RCA)
-  async getAiRootCause(logCount = 200) {
+  async getAiRootCause(logCount = 30) {
+    // Reduced to 30 for faster processing and to avoid LLM context issues
     const response = await api.get("/api/ai_analysis", {
       params: { log_count: logCount, mode: "root_cause" },
     });

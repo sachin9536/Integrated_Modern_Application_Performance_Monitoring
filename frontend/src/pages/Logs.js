@@ -51,6 +51,7 @@ const Logs = () => {
   });
 
   const [showFilters, setShowFilters] = useState(false);
+  const [hasMoreLogs, setHasMoreLogs] = useState(true);
   const logsEndRef = useRef(null);
 
   // Handle URL parameters for service filtering
@@ -69,8 +70,9 @@ const Logs = () => {
   const fetchLogs = useCallback(async () => {
     try {
       setLoading(true);
-      const logsData = await apiService.getLogs();
+      const logsData = await apiService.getLogs(1000); // Fetch 1,000 logs by default
       setLogs(logsData.logs || []);
+      setHasMoreLogs(logsData.total > logsData.logs.length);
       setLastUpdated(new Date());
     } catch (error) {
       console.error("Failed to fetch logs:", error);
@@ -79,6 +81,23 @@ const Logs = () => {
       setLoading(false);
     }
   }, []);
+
+  // Load more logs
+  const loadMoreLogs = async () => {
+    try {
+      setLoading(true);
+      const currentCount = logs.length;
+      const logsData = await apiService.getLogs(1000, currentCount); // Fetch 1,000 more logs
+      setLogs((prevLogs) => [...prevLogs, ...(logsData.logs || [])]);
+      setHasMoreLogs(logsData.total > currentCount + logsData.logs.length);
+      toast.success(`Loaded ${logsData.logs.length} more logs`);
+    } catch (error) {
+      console.error("Failed to load more logs:", error);
+      toast.error("Failed to load more logs");
+    } finally {
+      setLoading(false);
+    }
+  };
 
   useEffect(() => {
     fetchLogs();
@@ -255,6 +274,9 @@ const Logs = () => {
         <div className="flex items-center space-x-4">
           <div className="text-sm text-gray-500">
             {filteredLogs.length} of {logs.length} logs
+            {hasMoreLogs && (
+              <span className="text-blue-600"> (more available)</span>
+            )}
           </div>
           <button
             onClick={fetchLogs}
@@ -456,49 +478,68 @@ const Logs = () => {
               </p>
             </div>
           ) : (
-            <div className="divide-y divide-gray-200">
-              {sortedFilteredLogs.map((log, index) => (
-                <div
-                  key={index}
-                  className="p-4 hover:bg-gray-50 transition-colors cursor-pointer"
-                  onClick={() => openLogDetails(log)}
-                >
-                  <div className="flex items-start justify-between">
-                    <div className="flex-1 min-w-0">
-                      <div className="flex items-center space-x-3 mb-2">
-                        <div
-                          className={`flex items-center space-x-1 px-2 py-1 rounded-full text-xs font-medium border ${getLogLevelColor(
-                            log.level
-                          )}`}
-                        >
-                          {getLogLevelIcon(log.level)}
-                          <span>{log.level?.toUpperCase() || "UNKNOWN"}</span>
+            <>
+              <div className="divide-y divide-gray-200">
+                {sortedFilteredLogs.map((log, index) => (
+                  <div
+                    key={index}
+                    className="p-4 hover:bg-gray-50 transition-colors cursor-pointer"
+                    onClick={() => openLogDetails(log)}
+                  >
+                    <div className="flex items-start justify-between">
+                      <div className="flex-1 min-w-0">
+                        <div className="flex items-center space-x-3 mb-2">
+                          <div
+                            className={`flex items-center space-x-1 px-2 py-1 rounded-full text-xs font-medium border ${getLogLevelColor(
+                              log.level
+                            )}`}
+                          >
+                            {getLogLevelIcon(log.level)}
+                            <span>{log.level?.toUpperCase() || "UNKNOWN"}</span>
+                          </div>
+                          {log.service && (
+                            <StatusBadge status="info" text={log.service} />
+                          )}
+                          <span className="text-sm text-gray-500">
+                            {dataUtils.formatTimestamp(log.timestamp)}
+                          </span>
                         </div>
-                        {log.service && (
-                          <StatusBadge status="info" text={log.service} />
-                        )}
-                        <span className="text-sm text-gray-500">
-                          {dataUtils.formatTimestamp(log.timestamp)}
-                        </span>
+                        <p className="text-sm text-gray-900 truncate">
+                          {log.message}
+                        </p>
                       </div>
-                      <p className="text-sm text-gray-900 truncate">
-                        {log.message}
-                      </p>
+                      <button
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          openLogDetails(log);
+                        }}
+                        className="ml-4 p-1 text-gray-400 hover:text-gray-600"
+                      >
+                        <EyeIcon className="w-4 h-4" />
+                      </button>
                     </div>
-                    <button
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        openLogDetails(log);
-                      }}
-                      className="ml-4 p-1 text-gray-400 hover:text-gray-600"
-                    >
-                      <EyeIcon className="w-4 h-4" />
-                    </button>
                   </div>
+                ))}
+                <div ref={logsEndRef} />
+              </div>
+
+              {/* Load More Button */}
+              {hasMoreLogs && !loading && (
+                <div className="p-4 text-center border-t border-gray-200">
+                  <button
+                    onClick={loadMoreLogs}
+                    disabled={loading}
+                    className="btn btn-primary"
+                  >
+                    {loading ? "Loading..." : "Load More Logs"}
+                  </button>
+                  <p className="text-sm text-gray-500 mt-2">
+                    Currently showing {logs.length} of{" "}
+                    {logs.length + (hasMoreLogs ? " many more" : "")} total logs
+                  </p>
                 </div>
-              ))}
-              <div ref={logsEndRef} />
-            </div>
+              )}
+            </>
           )}
         </div>
       </div>

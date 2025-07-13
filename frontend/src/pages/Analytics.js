@@ -39,6 +39,8 @@ const Analytics = () => {
   const [logSummaryLoading, setLogSummaryLoading] = useState(false);
   const [rca, setRca] = useState(null);
   const [rcaLoading, setRcaLoading] = useState(false);
+  // NEW: Registered services state
+  const [registeredServices, setRegisteredServices] = useState([]);
 
   // Chart colors
   const colors = {
@@ -136,17 +138,26 @@ const Analytics = () => {
     try {
       setLogSummaryLoading(true);
       const result = await apiService.getAiLogSummary(200);
-      // result.ai_summary.summary is the summary string
+      console.log("AI Summary Result:", result); // Debug log
+
+      // Handle different response formats
       if (result.ai_summary?.summary) {
         setLogSummary(result.ai_summary.summary);
       } else if (typeof result.ai_summary === "string") {
         setLogSummary(result.ai_summary);
+      } else if (result.summary) {
+        setLogSummary(result.summary);
       } else {
-        setLogSummary(null);
+        console.warn("Unexpected AI summary response format:", result);
+        setLogSummary("AI analysis completed but no summary was generated.");
       }
     } catch (error) {
+      console.error("AI Summary Error:", error);
       setLogSummary(null);
-      toast.error("Failed to fetch AI log summary");
+      toast.error(
+        "Failed to fetch AI log summary: " +
+          (error.response?.data?.detail || error.message)
+      );
     } finally {
       setLogSummaryLoading(false);
     }
@@ -156,17 +167,31 @@ const Analytics = () => {
   const fetchRca = async () => {
     try {
       setRcaLoading(true);
-      const result = await apiService.getAiRootCause(200);
-      if (result.ai_analysis?.rca) {
+      const result = await apiService.getAiRootCause(30);
+      console.log("AI RCA Result:", result); // Debug log
+
+      // Handle different response formats
+      if (result.ai_analysis?.root_cause) {
+        setRca(result.ai_analysis.root_cause);
+      } else if (result.ai_analysis?.rca) {
         setRca(result.ai_analysis.rca);
+      } else if (result.root_cause) {
+        setRca(result.root_cause);
       } else if (result.rca) {
         setRca(result.rca);
       } else {
-        setRca(null);
+        console.warn("Unexpected AI RCA response format:", result);
+        setRca(
+          "AI analysis completed but no root cause analysis was generated."
+        );
       }
     } catch (error) {
+      console.error("AI RCA Error:", error);
       setRca(null);
-      toast.error("Failed to fetch AI RCA");
+      toast.error(
+        "Failed to fetch AI RCA: " +
+          (error.response?.data?.detail || error.message)
+      );
     } finally {
       setRcaLoading(false);
     }
@@ -313,6 +338,19 @@ const Analytics = () => {
     doc.save("ai-root-cause-analysis.pdf");
   };
 
+  // NEW: Fetch registered services on mount
+  useEffect(() => {
+    const fetchRegisteredServices = async () => {
+      try {
+        const response = await apiService.getRegisteredServices();
+        setRegisteredServices(response.registered_services || []);
+      } catch (e) {
+        setRegisteredServices([]);
+      }
+    };
+    fetchRegisteredServices();
+  }, []);
+
   useEffect(() => {
     fetchAnalyticsData();
     const interval = setInterval(fetchAnalyticsData, 30000);
@@ -333,10 +371,12 @@ const Analytics = () => {
     })
   );
 
-  // Service performance data
+  // Service performance data (filtered to registered services only)
+  const registeredServiceNames = registeredServices.map((s) => s.name);
   const servicePerformance = analytics?.log_analytics?.services || {};
-  const serviceData = Object.entries(servicePerformance).map(
-    ([service, data]) => ({
+  const serviceData = Object.entries(servicePerformance)
+    .filter(([service]) => registeredServiceNames.includes(service))
+    .map(([service, data]) => ({
       service,
       avgLatency: data.avg_latency || 0,
       errorRate:
@@ -344,8 +384,7 @@ const Analytics = () => {
         ((data.errors || 0) / Math.max(data.total_requests || 1, 1)) * 100,
       totalRequests: data.total_requests || 0,
       errors: data.errors || 0,
-    })
-  );
+    }));
 
   // Key metrics
   const keyMetrics = [
@@ -703,55 +742,53 @@ const Analytics = () => {
       {/* Detailed Analytics */}
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
         {/* Response Codes */}
-        <div className="card">
-          <div className="card-header">
-            <h2 className="card-title">Response Code Distribution</h2>
-          </div>
-          <div className="p-6">
-            {analytics?.log_analytics?.response_codes ? (
-              <div className="space-y-3">
-                {Object.entries(analytics.log_analytics.response_codes).map(
-                  ([code, count]) => (
-                    <div
-                      key={code}
-                      className="flex items-center justify-between"
-                    >
-                      <div className="flex items-center space-x-3">
-                        <StatusBadge
-                          status={
-                            code.startsWith("2")
-                              ? "success"
+        {analytics?.log_analytics?.response_codes &&
+          Object.keys(analytics.log_analytics.response_codes).length > 0 && (
+            <div className="card">
+              <div className="card-header">
+                <h2 className="card-title">Response Code Distribution</h2>
+              </div>
+              <div className="p-6">
+                <div className="space-y-3">
+                  {Object.entries(analytics.log_analytics.response_codes).map(
+                    ([code, count]) => (
+                      <div
+                        key={code}
+                        className="flex items-center justify-between"
+                      >
+                        <div className="flex items-center space-x-3">
+                          <StatusBadge
+                            status={
+                              code.startsWith("2")
+                                ? "success"
+                                : code.startsWith("4")
+                                ? "warning"
+                                : code.startsWith("5")
+                                ? "error"
+                                : "info"
+                            }
+                            text={code}
+                          />
+                          <span className="text-sm text-gray-600">
+                            {code.startsWith("2")
+                              ? "Success"
                               : code.startsWith("4")
-                              ? "warning"
-                              : "error"
-                          }
-                          text={code}
-                        />
-                        <span className="text-sm text-gray-600">
-                          {code.startsWith("2")
-                            ? "Success"
-                            : code.startsWith("4")
-                            ? "Client Error"
-                            : code.startsWith("5")
-                            ? "Server Error"
-                            : "Other"}
+                              ? "Client Error"
+                              : code.startsWith("5")
+                              ? "Server Error"
+                              : "Other"}
+                          </span>
+                        </div>
+                        <span className="font-semibold text-gray-900">
+                          {count}
                         </span>
                       </div>
-                      <span className="font-semibold text-gray-900">
-                        {count}
-                      </span>
-                    </div>
-                  )
-                )}
+                    )
+                  )}
+                </div>
               </div>
-            ) : (
-              <p className="text-gray-500 text-center py-8">
-                No response code data available
-              </p>
-            )}
-          </div>
-        </div>
-
+            </div>
+          )}
         {/* Service Health */}
         <div className="card">
           <div className="card-header">
@@ -760,8 +797,11 @@ const Analytics = () => {
           <div className="p-6">
             {analytics?.log_analytics?.services ? (
               <div className="space-y-4">
-                {Object.entries(analytics.log_analytics.services).map(
-                  ([service, data]) => (
+                {Object.entries(analytics.log_analytics.services)
+                  .filter(([service]) =>
+                    registeredServiceNames.includes(service)
+                  )
+                  .map(([service, data]) => (
                     <div
                       key={service}
                       className="border border-gray-200 rounded-lg p-4"
@@ -798,8 +838,7 @@ const Analytics = () => {
                         </div>
                       </div>
                     </div>
-                  )
-                )}
+                  ))}
               </div>
             ) : (
               <p className="text-gray-500 text-center py-8">

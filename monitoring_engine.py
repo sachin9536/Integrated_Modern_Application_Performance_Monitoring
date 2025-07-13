@@ -80,8 +80,12 @@ async def background_user_service_metrics_scraper():
                         else:
                             service_uptime_tracker[name]["last_healthy"] = current_time
                         
-                        # Calculate uptime in minutes
-                        uptime_minutes = (current_time - service_uptime_tracker[name]["first_seen"]) / 60
+                        # Calculate uptime from Prometheus process_start_time_seconds
+                        uptime = None
+                        if "process_start_time_seconds" in metrics:
+                            process_start_time = metrics["process_start_time_seconds"]
+                            if process_start_time > 0:
+                                uptime = (current_time - process_start_time) / 60  # in minutes
                         
                         # Store historical metrics for load forecasting
                         save_metrics_history(name, metrics, current_time)
@@ -93,7 +97,7 @@ async def background_user_service_metrics_scraper():
                             "error": None,
                             "owner": owner,
                             "url": url,
-                            "uptime_minutes": uptime_minutes
+                            "uptime": uptime
                         }
                     else:
                         user_service_metrics[name] = {
@@ -152,8 +156,12 @@ async def scrape_metrics_for_user(user_email: str):
                 else:
                     service_uptime_tracker[name]["last_healthy"] = current_time
                 
-                # Calculate uptime in minutes
-                uptime_minutes = (current_time - service_uptime_tracker[name]["first_seen"]) / 60
+                # Calculate uptime from Prometheus process_start_time_seconds
+                uptime = None
+                if "process_start_time_seconds" in metrics:
+                    process_start_time = metrics["process_start_time_seconds"]
+                    if process_start_time > 0:
+                        uptime = (current_time - process_start_time) / 60  # in minutes
                 
                 # Store historical metrics for load forecasting
                 save_metrics_history(name, metrics, current_time)
@@ -165,7 +173,7 @@ async def scrape_metrics_for_user(user_email: str):
                     "error": None,
                     "owner": user_email,
                     "url": url,
-                    "uptime_minutes": uptime_minutes
+                    "uptime": uptime
                 }
             else:
                 user_service_metrics[name] = {
@@ -761,6 +769,9 @@ def get_groq_headers():
     }
 
 async def ask_llm_groq(prompt: str) -> str:
+    if not GROQ_API_KEY:
+        return "Error: GROQ_API_KEY not configured. Please set the GROQ_API_KEY environment variable."
+    
     url = "https://api.groq.com/openai/v1/chat/completions"
     headers = get_groq_headers()
     data = {
@@ -770,12 +781,33 @@ async def ask_llm_groq(prompt: str) -> str:
         ]
     }
     try:
+        print(f"Calling Groq API with model: {GROQ_MODEL}")
         async with httpx.AsyncClient(timeout=60.0) as client:
             resp = await client.post(url, headers=headers, json=data)
-            resp.raise_for_status()
+            print(f"Groq API response status: {resp.status_code}")
+            
+            if resp.status_code != 200:
+                error_text = resp.text
+                print(f"Groq API error response: {error_text}")
+                return f"Groq API error (HTTP {resp.status_code}): {error_text}"
+            
             result = resp.json()
-            return result["choices"][0]["message"]["content"]
+            print(f"Groq API response: {result}")
+            
+            if "choices" in result and len(result["choices"]) > 0:
+                content = result["choices"][0]["message"]["content"]
+                print(f"Groq API content length: {len(content)}")
+                return content
+            else:
+                print(f"Unexpected Groq API response format: {result}")
+                return f"Unexpected Groq API response format: {result}"
+                
+    except httpx.TimeoutException:
+        return "Error: Groq API request timed out after 60 seconds."
+    except httpx.ConnectError:
+        return "Error: Cannot connect to Groq API. Check your internet connection."
     except Exception as e:
+        print(f"Groq API exception: {str(e)}")
         return f"Groq API error: {str(e)}"
 
 # --- Focused log selection for root cause analysis ---
@@ -816,14 +848,58 @@ async def ai_incident_analysis(anomaly, logs, metrics, dependencies=None, cache_
         recent_logs = [{"message": "No recent logs available."}]
     if not metrics:
         metrics = {"total": 0, "errors": 0, "performance_metrics": {"error_rate": 0}}
+    # --- Updated prompt for strict JSON output ---
     if prompt_type == "incident":
-        prompt = f"""You are an SRE analyzing a system incident. Please provide a concise analysis.\n\nINCIDENT DETAILS:\nAnomaly: {anomaly}\n\nRECENT LOGS (last {len(recent_logs)}):\n{chr(10).join([json.dumps(log, default=str)[:200] + '...' if len(json.dumps(log, default=str)) > 200 else json.dumps(log, default=str) for log in recent_logs])}\n\nMETRICS SUMMARY:\n- Total requests: {metrics.get('total', 0)}\n- Error count: {metrics.get('errors', 0)}\n- Error rate: {metrics.get('performance_metrics', {}).get('error_rate', 0):.2f}%\n\nSERVICE DEPENDENCIES: {dependencies or 'N/A'}\n\nPlease provide:\n1. INCIDENT SUMMARY (2-3 sentences)\n2. LIKELY ROOT CAUSE (1-2 sentences)\n3. IMMEDIATE ACTIONS (2-3 bullet points)\n4. PREVENTION (1-2 recommendations)\n\nKeep response under 300 words.\n"""
+        prompt = f"""You are an SRE analyzing a system incident. Please provide a concise analysis.
+
+INCIDENT DETAILS:\nAnomaly: {anomaly}
+
+RECENT LOGS (last {len(recent_logs)}):\n{chr(10).join([json.dumps(log, default=str)[:200] + '...' if len(json.dumps(log, default=str)) > 200 else json.dumps(log, default=str) for log in recent_logs])}
+
+METRICS SUMMARY:\n- Total requests: {metrics.get('total', 0)}\n- Error count: {metrics.get('errors', 0)}\n- Error rate: {metrics.get('performance_metrics', {}).get('error_rate', 0):.2f}%
+
+SERVICE DEPENDENCIES: {dependencies or 'N/A'}
+
+Respond ONLY with valid JSON. Do NOT include any explanation, markdown, or comments. Your entire response must be a single valid JSON object, with no text before or after.
+{{
+  \"summary\": \"...\",
+  \"root_cause\": \"...\",
+  \"actions\": [\"...\", \"...\"],
+  \"prevention\": [\"...\", \"...\"],
+  \"confidence\": \"...\",
+  \"evidence\": [\"...\", \"...\"]
+}}
+"""
     else:
-        prompt = f"""You are an SRE reviewing system logs. No explicit anomaly was detected, but please review the following logs and metrics for any issues, unusual patterns, or potential risks.\n\nLOG SAMPLE (last {len(recent_logs)}):\n{chr(10).join([json.dumps(log, default=str)[:200] + '...' if len(json.dumps(log, default=str)) > 200 else json.dumps(log, default=str) for log in recent_logs])}\n\nMETRICS SUMMARY:\n- Total requests: {metrics.get('total', 0)}\n- Error count: {metrics.get('errors', 0)}\n- Error rate: {metrics.get('performance_metrics', {}).get('error_rate', 0):.2f}%\n\nSERVICE DEPENDENCIES: {dependencies or 'N/A'}\n\nPlease provide:\n1. OVERALL HEALTH SUMMARY (2-3 sentences)\n2. ANY ISSUES, RISKS, OR UNUSUAL PATTERNS (bullet points)\n3. RECOMMENDATIONS (1-2 bullet points)\n\nKeep response under 300 words.\n"""
+        prompt = f"""You are an SRE reviewing system logs. No explicit anomaly was detected, but please review the following logs and metrics for any issues, unusual patterns, or potential risks.\n\nLOG SAMPLE (last {len(recent_logs)}):\n{chr(10).join([json.dumps(log, default=str)[:200] + '...' if len(json.dumps(log, default=str)) > 200 else json.dumps(log, default=str) for log in recent_logs])}\n\nMETRICS SUMMARY:\n- Total requests: {metrics.get('total', 0)}\n- Error count: {metrics.get('errors', 0)}\n- Error rate: {metrics.get('performance_metrics', {}).get('error_rate', 0):.2f}%\n\nSERVICE DEPENDENCIES: {dependencies or 'N/A'}\n\nRespond ONLY with valid JSON. Do NOT include any explanation, markdown, or comments. Your entire response must be a single valid JSON object, with no text before or after.\n{{\n  \"summary\": \"...\",\n  \"root_cause\": \"...\",\n  \"actions\": [\"...\", \"...\"],\n  \"prevention\": [\"...\", \"...\"],\n  \"confidence\": \"...\",\n  \"evidence\": [\"...\", \"...\"]\n}}\n"""
     ai_result = await ask_llm_groq(prompt)
+    # --- Try to parse as JSON, removing comment lines ---
+    parsed_result = None
+    if isinstance(ai_result, str):
+        try:
+            # Extract JSON block
+            start = ai_result.find('{')
+            end = ai_result.rfind('}')
+            if start != -1 and end != -1:
+                json_str = ai_result[start:end+1]
+                # Remove lines starting with // (comments)
+                json_str = '\n'.join(line for line in json_str.splitlines() if not line.strip().startswith('//'))
+                parsed_result = json.loads(json_str)
+        except Exception as e:
+            parsed_result = None
+    # If parsing failed, fallback to string in a single field
+    if not parsed_result:
+        parsed_result = {
+            "summary": None,
+            "root_cause": ai_result if isinstance(ai_result, str) else str(ai_result),
+            "actions": [],
+            "prevention": [],
+            "confidence": None,
+            "evidence": []
+        }
     result = {
         "anomalies": anomaly_cache,
-        "root_cause": ai_result
+        "root_cause": parsed_result
     }
     # Cache the result
     if cache_key:
@@ -1175,7 +1251,7 @@ def tail_log_file(path: Path, n: int) -> list:
 @app.get("/api/logs")
 async def api_logs(
     offset: int = Query(0, ge=0),
-    limit: int = Query(1000, ge=1, le=10000),
+    limit: int = Query(1000, ge=1, le=10000),  # Reduced back to 1000 for faster loading
     level: str = Query(None),
     service: str = Query(None),
     time_start: str = Query(None),
@@ -1324,6 +1400,14 @@ async def api_registered_services(user_email: str = Depends(get_current_user_ema
         svc_dict = mongo_to_dict(svc)
         name = svc_dict["name"]
         metrics_info = user_service_metrics.get(name, {})
+        
+        # Calculate uptime from Prometheus metrics
+        uptime = None
+        if metrics_info.get("metrics") and "process_start_time_seconds" in metrics_info["metrics"]:
+            process_start_time = metrics_info["metrics"]["process_start_time_seconds"]
+            if process_start_time > 0:
+                uptime = (time.time() - process_start_time) / 60  # in minutes
+        
         result.append({
             "name": svc_dict["name"],
             "url": svc_dict["url"],
@@ -1333,7 +1417,8 @@ async def api_registered_services(user_email: str = Depends(get_current_user_ema
             "status": metrics_info.get("status", "unknown"),
             "metrics": metrics_info.get("metrics", {}),
             "last_scraped": metrics_info.get("last_scraped"),
-            "error": metrics_info.get("error")
+            "error": metrics_info.get("error"),
+            "uptime": round(uptime, 2) if uptime else None
         })
     return {"registered_services": result}
 
@@ -1878,6 +1963,35 @@ async def api_all_registered_services():
 async def test_endpoint():
     """Simple test endpoint to verify backend is working"""
     return {"message": "Backend is working", "timestamp": datetime.utcnow().isoformat()}
+
+@app.get("/api/test_groq")
+async def test_groq():
+    """Test GROQ API connection and functionality"""
+    try:
+        if not GROQ_API_KEY:
+            return {
+                "status": "error",
+                "message": "GROQ_API_KEY not configured",
+                "groq_key_set": False
+            }
+        
+        # Test with a simple prompt
+        test_prompt = "Hello, please respond with 'GROQ API is working' if you can see this message."
+        result = await ask_llm_groq(test_prompt)
+        
+        return {
+            "status": "success" if "GROQ API is working" in result else "error",
+            "message": result,
+            "groq_key_set": True,
+            "model": GROQ_MODEL
+        }
+    except Exception as e:
+        return {
+            "status": "error",
+            "message": f"Test failed: {str(e)}",
+            "groq_key_set": bool(GROQ_API_KEY),
+            "model": GROQ_MODEL
+        }
 
 @app.post("/api/reset_uptime/{service_name}")
 async def reset_service_uptime(service_name: str, user_email: str = Depends(get_current_user_email)):
