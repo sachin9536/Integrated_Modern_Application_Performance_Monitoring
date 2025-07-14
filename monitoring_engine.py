@@ -1526,39 +1526,44 @@ async def api_system_overview(user_email: str = Depends(get_current_user_email))
         })
     healthy_count = len([s for s in services if s.get("status") == "healthy"])
     unhealthy_count = len([s for s in services if s.get("status") != "healthy"])
+
+    # --- NEW: Fetch all databases for this user ---
+    dbs = list(db_mgmt_collection.find({"owner": user_email}))
+    for db in dbs:
+        db["_id"] = str(db["_id"])
+    total = len(dbs)
+    connected = len([db for db in dbs if db.get("status") == "connected"])
+    disconnected = total - connected
+    details = [
+        {"name": db["name"], "status": db.get("status", "unknown")} for db in dbs
+    ]
     return {
         "total_applications": len(services),
         "services": services,
         "databases": {
-            "total": 1,  # MongoDB
-            "connected": 1,
-            "disconnected": 0,
-            "details": [
-                {
-                    "name": "MongoDB",
-                    "status": "connected"
-                }
-            ]
+            "total": total,
+            "connected": connected,
+            "disconnected": disconnected,
+            "details": details
         }
     }
 
 @app.get("/api/databases")
-async def api_databases():
-    """Return registered databases"""
-    return {
-        "databases": [
-            {"name": "MongoDB", "uri": "mongodb://admin:secret@mongodb:27017", "status": "connected"}
-        ]
-    }
+async def api_databases(user_email: str = Depends(get_current_user_email)):
+    dbs = list(db_mgmt_collection.find({"owner": user_email}))
+    for db in dbs:
+        db["_id"] = str(db["_id"])
+    return {"databases": dbs}
 
 def check_postgres_health(uri):
     import time
     import re
     from urllib.parse import urlparse
     start = time.time()
+    uri = uri.strip()  # Strip whitespace
     dsn = uri
-    # If URI starts with postgresql://, parse and convert to DSN
-    if uri.startswith("postgresql://"):
+    # Accept both 'postgresql://' and 'postgres://' prefixes
+    if uri.startswith("postgresql://") or uri.startswith("postgres://"):
         parsed = urlparse(uri)
         user = parsed.username or ""
         password = parsed.password or ""
@@ -1582,7 +1587,7 @@ def check_postgres_health(uri):
             "host": host,
             "port": port,
             "error": None,
-            "last_checked": datetime.utcnow().isoformat()
+            "last_checked": datetime.now().isoformat()
         }
     except Exception as e:
         return {
@@ -1591,7 +1596,7 @@ def check_postgres_health(uri):
             "host": "-",
             "port": "-",
             "error": str(e),
-            "last_checked": datetime.utcnow().isoformat()
+            "last_checked": datetime.now().isoformat()
         }
 
 def check_mysql_health(uri):
@@ -1605,7 +1610,7 @@ def check_mysql_health(uri):
             "host": "-",
             "port": "-",
             "error": "mysql-connector-python not installed",
-            "last_checked": datetime.utcnow().isoformat()
+            "last_checked": datetime.now().isoformat()
         }
     start = time.time()
     try:
@@ -1633,7 +1638,7 @@ def check_mysql_health(uri):
             "host": host,
             "port": port,
             "error": None,
-            "last_checked": datetime.utcnow().isoformat()
+            "last_checked": datetime.now().isoformat()
         }
     except Exception as e:
         host = parsed.hostname if 'parsed' in locals() else "-"
@@ -1644,7 +1649,7 @@ def check_mysql_health(uri):
             "host": host,
             "port": port,
             "error": str(e),
-            "last_checked": datetime.utcnow().isoformat()
+            "last_checked": datetime.now().isoformat()
         }
 
 def check_database_health(db_type, uri):
@@ -1661,19 +1666,19 @@ def check_database_health(db_type, uri):
             "host": "-",
             "port": "-",
             "error": f"Unsupported database type: {db_type}",
-            "last_checked": datetime.utcnow().isoformat()
+            "last_checked": datetime.now().isoformat()
         }
 
 @app.post("/api/databases")
-async def add_database(data: dict):
+async def add_database(data: dict, user_email: str = Depends(get_current_user_email)):
     """Add a new database (MongoDB, PostgreSQL, MySQL) and check its health, storing in MongoDB."""
     name = data.get("name")
     uri = data.get("uri")
     db_type = data.get("type", "mongodb")
     if not name or not uri or not db_type:
         return {"status": "error", "message": "Name, URI, and type are required"}
-    # Check if already exists
-    existing = db_mgmt_collection.find_one({"name": name})
+    # Check if already exists for this user
+    existing = db_mgmt_collection.find_one({"name": name, "owner": user_email})
     if existing:
         return {"status": "error", "message": f"Database '{name}' already exists"}
     # Health check
@@ -1682,18 +1687,12 @@ async def add_database(data: dict):
         "name": name,
         "uri": uri,
         "type": db_type,
+        "owner": user_email,
         **health
     }
-    db_mgmt_collection.insert_one(db_doc)
+    result = db_mgmt_collection.insert_one(db_doc)
+    db_doc["_id"] = str(result.inserted_id)
     return {"status": "success", "message": f"Database '{name}' added successfully", **db_doc}
-
-@app.get("/api/databases")
-async def api_databases():
-    """Return all registered databases with their latest status."""
-    dbs = list(db_mgmt_collection.find({}))
-    for db in dbs:
-        db["_id"] = str(db["_id"])
-    return {"databases": dbs}
 
 @app.delete("/api/databases")
 async def remove_database(name: str):
@@ -2829,7 +2828,7 @@ def check_mongo_health(uri):
             "host": host,
             "port": port,
             "error": None,
-            "last_checked": datetime.utcnow().isoformat()
+            "last_checked": datetime.now().isoformat()
         }
     except Exception as e:
         host, port = parse_mongo_uri(uri)
@@ -2839,7 +2838,7 @@ def check_mongo_health(uri):
             "host": host,
             "port": port,
             "error": str(e),
-            "last_checked": datetime.utcnow().isoformat()
+            "last_checked": datetime.now().isoformat()
         }
 
 # --- Registered Databases Collection ---
@@ -2857,3 +2856,20 @@ async def test_database_connection(data: dict):
         return {"success": True, "message": f"Successfully connected to {db_type} database.", **health}
     else:
         return {"success": False, "message": health.get("error", "Connection failed"), **health}
+
+@app.get("/api/export_metrics_history_log")
+async def export_metrics_history_log(user_email: str = Depends(get_current_user_email)):
+    """Export all metrics_history documents to logs/metrics_history_export.log as JSON lines."""
+    from pathlib import Path
+    import json
+    log_dir = Path("/app/logs")
+    log_dir.mkdir(parents=True, exist_ok=True)
+    export_path = log_dir / "metrics_history_export.log"
+    count = 0
+    with export_path.open("w", encoding="utf-8") as f:
+        cursor = metrics_history_collection.find({})
+        for doc in cursor:
+            doc["_id"] = str(doc["_id"])
+            f.write(json.dumps(doc, default=str) + "\n")
+            count += 1
+    return {"status": "success", "exported": count, "file": str(export_path)}

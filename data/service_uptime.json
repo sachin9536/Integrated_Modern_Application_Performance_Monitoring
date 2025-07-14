@@ -25,10 +25,14 @@
   },
   "Ereadz": {
     "first_seen": 1752328132.8587093,
-    "last_healthy": 1752415842.6363902
+    "last_healthy": 1752503516.3647256
   },
   "Ereadz2": {
     "first_seen": 1752407706.1997263,
-    "last_healthy": 1752415842.7371602
+    "last_healthy": 1752503516.4883862
+  },
+  "Ereadz3": {
+    "first_seen": 1752490098.7168734,
+    "last_healthy": 1752503516.4253697
   }
 }
